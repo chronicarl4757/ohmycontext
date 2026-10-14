@@ -11,6 +11,7 @@
   "scripts": {
     "build": "pnpm -r build",
     "dev": "tsx apps/cli/src/index.ts",
+    "ui": "tsx apps/cli/src/index.ts ui",
     "clean": "pnpm -r exec rm -rf dist .tsup"
   },
   "devDependencies": {

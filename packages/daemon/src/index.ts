@@ -1,4 +1,4 @@
-export { createApp, handleMcpHttp } from './server.js';
+export { createApp, handleMcpHttp, isAllowedLocalRequest, resolveWebDir } from './server.js';
 export {
   artifactDirs,
   artifactKindFor,

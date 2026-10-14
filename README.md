@@ -35,10 +35,17 @@ The CLI is `omc` (`apps/cli`). Run it from source with `pnpm dev <args>`, or aft
 ## Quickstart
 
 ```sh
+pnpm install && pnpm build
+omc ui        # scans your logs, starts the daemon, opens the web UI
+```
+
+That's the one-command path. CLI-only usage:
+
+```sh
 # one-shot scan of all known AI tool logs (~/.claude/projects, ~/.codex/sessions)
 omc watch --once
 
-# run the daemon: watches logs continuously + serves a local HTTP API
+# run the daemon: watches logs continuously + serves the local HTTP API/UI
 omc watch                 # http://127.0.0.1:27182 (OMC_PORT to override)
 
 # full-text search across every captured conversation
@@ -69,6 +76,10 @@ cat backup.jsonl | omc ingest
 | `GET /health`   | `{ok, version, uptimeSec}`                              |
 | `GET /stats`    | per-source counts, db size, event time range            |
 | `POST /ingest`  | body = open-format JSONL; returns `{ingested, skipped}` |
+| `GET /api/*`    | read-only JSON for the web UI (overview/sessions/search/artifacts/activity) |
+| `GET,POST /bus/*` | message bus: post / read (cursor) / channels          |
+| `/mcp`          | streamable-HTTP MCP endpoint                            |
+| `/`             | web UI (serves `apps/web/dist`)                         |
 
 `POST /ingest` is the entry point for future producers that can't be
 file-tailed (browser extensions, IDE plugins, other agents).
@@ -215,6 +226,27 @@ scheduler (Claude Code cron, Codex automations, a wrapper script) can call
 `bus_wait` on a cadence for minute-level responsiveness without burning API
 calls while idle.
 
+## M4 · Web UI (`omc ui`)
+
+`omc ui` starts the daemon (or reuses a running one) and opens the local web
+UI at `http://127.0.0.1:27182/`. Vanilla-TypeScript SPA, no framework, hash
+routing, dark theme:
+
+- **Overview** — store stats, per-source counts, last-24h activity feed.
+- **Sessions** — paginated, source-filtered table; click through to a
+  chronological message view (role-colored; tool calls collapsed; long
+  messages expandable; session artifacts listed).
+- **Search** — full-text search over everything, highlighted snippets, click
+  through to the session.
+- **Artifacts** — kind/path-prefix filters, session attribution links.
+- **Bus** — channel sidebar + live message pane (5s cursor polling, pauses
+  when the tab is hidden) with a post box.
+
+Everything is served by the daemon itself from `apps/web/dist`
+(`OMC_WEB_DIR` overrides the lookup); the same-origin web UI is explicitly
+allowlisted in the daemon's origin policy, every other browser origin is
+still blocked.
+
 ## Roadmap
 
 - **M0** — local capture (CLI agents), open JSONL event format, SQLite + FTS5,
@@ -223,8 +255,11 @@ calls while idle.
   MCP-capable client.
 - **M2** — browser extension capturing chatgpt.com / claude.ai conversations;
   daemon-side artifact directory watching with session attribution.
-- **M3 (this repo)** — AI↔AI local message bus: channels + cursors + long-poll,
+- **M3** — AI↔AI local message bus: channels + cursors + long-poll,
   over MCP tools and plain HTTP, mirrored into the store.
+- **M4 (this repo)** — local web UI served by the daemon + one-command `omc ui`.
+- **M5+ candidates** — more connectors (Gemini CLI, Cursor, Aider), remote
+  connectors feeding `POST /ingest`, extension dogfooding on live sites.
 
 ## Development
 

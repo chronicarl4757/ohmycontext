@@ -1,4 +1,5 @@
 import { Command } from 'commander';
+import { spawn } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -29,13 +30,29 @@ function withStore<T>(fn: (store: OmcStore) => T | Promise<T>): Promise<T> {
   return finish();
 }
 
+function openBrowser(url: string): void {
+  try {
+    const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
+    const child = spawn(cmd, [url], {
+      detached: true,
+      stdio: 'ignore',
+      ...(process.platform === 'win32' ? { shell: true } : {}),
+    });
+    child.on('error', () => {}); // headless / no browser: the URL is printed anyway
+    child.unref();
+  } catch {
+    // never crash over a browser
+  }
+}
+
 program
   .command('watch')
   .description('watch AI tool logs and ingest new events (HTTP API on 127.0.0.1)')
   .option('--once', 'scan all files once and exit')
-  .option('-p, --port <port>', 'HTTP port (env OMC_PORT)', String(DEFAULT_PORT))
-  .action(async (opts: { once?: boolean; port: string }) => {
-    const summary = await runDaemon({ once: Boolean(opts.once), port: Number(opts.port) });
+  .option('-p, --port <port>', 'HTTP port (env OMC_PORT)')
+  .action(async (opts: { once?: boolean; port?: string }) => {
+    const port = Number(opts.port ?? process.env.OMC_PORT) || DEFAULT_PORT;
+    const summary = await runDaemon({ once: Boolean(opts.once), port });
     if (opts.once) {
       console.log(
         `scanned ${summary.files} files (${summary.filesChanged} changed) in ${(summary.durationMs / 1000).toFixed(1)}s`,
@@ -49,6 +66,32 @@ program
         `total: ${summary.ingested} ingested, ${summary.skipped} skipped, ${summary.errors} errors`,
       );
     }
+  });
+
+program
+  .command('ui')
+  .description('open the web UI (starts the daemon first if not already running)')
+  .option('-p, --port <port>', 'HTTP port (env OMC_PORT)')
+  .action(async (opts: { port?: string }) => {
+    const port = Number(opts.port ?? process.env.OMC_PORT) || DEFAULT_PORT;
+    const url = `http://127.0.0.1:${port}/`;
+    const health = () =>
+      fetch(`http://127.0.0.1:${port}/health`)
+        .then((r) => r.ok)
+        .catch(() => false);
+    if (await health()) {
+      console.log(`\nomc ui → ${url}\n(daemon already running)\n`);
+      openBrowser(url);
+      return;
+    }
+    const daemonDone = runDaemon({ port });
+    for (let i = 0; i < 480; i++) {
+      if (await health()) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    console.log(`\nomc ui → ${url}\n`);
+    openBrowser(url);
+    await daemonDone;
   });
 
 program
