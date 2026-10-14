@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "verbatimModuleSyntax": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "paths": {
+      "@ohmycontext/core": ["./packages/core/src/index.ts"],
+      "@ohmycontext/connectors": ["./packages/connectors/src/index.ts"],
+      "@ohmycontext/daemon": ["./packages/daemon/src/index.ts"],
+      "@ohmycontext/mcp": ["./packages/mcp/src/index.ts"]
+    }
+  }
+}

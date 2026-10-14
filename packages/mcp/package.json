@@ -1,0 +1,29 @@
+{
+  "name": "@ohmycontext/mcp",
+  "version": "0.1.0",
+  "description": "MCP server exposing the ohmycontext store to any MCP-capable client",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@ohmycontext/core": "workspace:*",
+    "zod": "^4.1.11"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.2"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "omc",
+  "version": "0.1.0",
+  "description": "ohmycontext CLI — search and export your local AI context",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "omc": "dist/index.js"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@ohmycontext/core": "workspace:*",
+    "@ohmycontext/daemon": "workspace:*",
+    "@ohmycontext/mcp": "workspace:*",
+    "better-sqlite3": "^12.2.0",
+    "commander": "^14.0.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.18.0",
+    "tsup": "^8.5.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
