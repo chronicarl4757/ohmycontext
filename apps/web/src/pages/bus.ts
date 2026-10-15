@@ -73,7 +73,7 @@ export const page: Page<BusParams> = {
       if (!list) return;
       list.innerHTML =
         channels.length === 0
-          ? emptyState('还没有频道 — 在下方发一条消息即可创建')
+          ? emptyState("还没有频道。让接入 MCP 的 AI 发第一条消息，例如让 Codex 调用 bus_post 到 'review'。")
           : channels
               .map(
                 (ch) => `<a href="#/bus?channel=${encodeURIComponent(ch.channel)}" class="${ch.channel === activeChannel ? 'active' : ''}">

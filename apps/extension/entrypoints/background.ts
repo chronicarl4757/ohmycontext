@@ -21,12 +21,14 @@ interface SiteDiag {
   captures: number;
   lastSuccess: number | null;
   lastError: string | null;
+  hookActiveAt: number | null;
+  hookHost: string | null;
 }
 
 type Diag = Record<string, SiteDiag>;
 
 function emptySiteDiag(): SiteDiag {
-  return { requests: [], captures: 0, lastSuccess: null, lastError: null };
+  return { requests: [], captures: 0, lastSuccess: null, lastError: null, hookActiveAt: null, hookHost: null };
 }
 
 export default defineBackground(() => {
@@ -66,6 +68,9 @@ export default defineBackground(() => {
       } else if (event === 'captured') {
         d.captures++;
         d.lastSuccess = Date.now();
+      } else if (event === 'hook-active') {
+        d.hookActiveAt = Date.now();
+        d.hookHost = detail;
       } else if (event === 'error') {
         d.lastError = detail;
       }
@@ -127,7 +132,9 @@ export default defineBackground(() => {
       await browser.storage.local.set({ [SENT_KEY]: Number(sent[SENT_KEY] ?? 0) + lines.length });
       await noteFlushSuccess(pendingSources);
       pendingSources = new Set();
-    } catch {
+      await recordDiag('_daemon', 'captured', '');
+    } catch (err) {
+      await recordDiag('_daemon', 'error', err instanceof Error ? err.message : String(err));
       const queued = await getQueue();
       const all = [...queued, ...pending];
       pending = [];

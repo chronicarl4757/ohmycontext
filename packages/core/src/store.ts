@@ -213,18 +213,40 @@ CREATE TABLE IF NOT EXISTS bus_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_bus_channel ON bus_messages(channel, seq);
 
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
   content, content='messages', content_rowid='rowid'
 );
+`;
+
+// CJK runs are expanded to unigrams+bigrams before indexing so substring
+// search works for Chinese/Japanese text (FTS5 unicode61 treats a whole CJK
+// sentence as one token otherwise). Query text goes through the same expansion.
+const CJK_RUN_RE = /[぀-ヿ㐀-䶿一-鿿豈-﫿]+/gu;
+
+export function cjkExpand(s: string): string {
+  return s.replace(CJK_RUN_RE, (run) => {
+    const chars = Array.from(run);
+    const parts: string[] = [...chars];
+    for (let i = 0; i + 1 < chars.length; i++) parts.push(`${chars[i]}${chars[i + 1]}`);
+    return ` ${parts.join(' ')} `;
+  });
+}
+
+const FTS_TRIGGERS = `
 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-  INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+  INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, cjk_expand(new.content));
 END;
 CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-  INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+  INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, cjk_expand(old.content));
 END;
 CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-  INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
-  INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+  INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, cjk_expand(old.content));
+  INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, cjk_expand(new.content));
 END;
 `;
 
@@ -234,11 +256,24 @@ function canonDate(s: string): string {
 }
 
 function toFtsQuery(query: string): string {
-  return query
+  return cjkExpand(query)
     .split(/\s+/)
     .filter((t) => t.length > 0)
     .map((t) => `"${t.replace(/"/g, '""')}"`)
     .join(' ');
+}
+
+function makeSnippet(content: string, query: string): string {
+  const lower = content.toLowerCase();
+  let idx = -1;
+  for (const term of query.split(/\s+/).filter(Boolean)) {
+    const i = lower.indexOf(term.toLowerCase());
+    if (i !== -1 && (idx === -1 || i < idx)) idx = i;
+  }
+  if (idx === -1) return content.slice(0, 120).replace(/\s+/g, ' ');
+  const start = Math.max(0, idx - 60);
+  const end = Math.min(content.length, idx + 180);
+  return `${start > 0 ? '…' : ''}${content.slice(start, end)}${end < content.length ? '…' : ''}`;
 }
 
 function likeEscape(s: string): string {
@@ -368,7 +403,36 @@ export class OmcStore {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
     this.db.pragma('busy_timeout = 5000');
+    this.db.function('cjk_expand', { deterministic: true }, cjkExpand);
     this.db.exec(SCHEMA);
+    this.migrateFtsCjk();
+  }
+
+  /**
+   * One-time rebuild of the FTS index with CJK bigram expansion. Existing
+   * databases carry unicode61-tokenized content where CJK substring search
+   * silently misses; re-tokenize once, mark in meta, then keep triggers in sync.
+   */
+  private migrateFtsCjk(): void {
+    const marked = this.db.prepare("SELECT value FROM meta WHERE key = 'fts_cjk'").get() as
+      | { value: string }
+      | undefined;
+    if (marked?.value !== '1') {
+      this.db.exec(`
+        DROP TRIGGER IF EXISTS messages_ai;
+        DROP TRIGGER IF EXISTS messages_ad;
+        DROP TRIGGER IF EXISTS messages_au;
+        DROP TABLE IF EXISTS messages_fts;
+        CREATE VIRTUAL TABLE messages_fts USING fts5(content, content='messages', content_rowid='rowid');
+      `);
+      this.db.exec(FTS_TRIGGERS);
+      this.db.prepare('INSERT INTO messages_fts(rowid, content) SELECT rowid, cjk_expand(content) FROM messages').run();
+      this.db
+        .prepare("INSERT INTO meta (key, value) VALUES ('fts_cjk', '1') ON CONFLICT(key) DO UPDATE SET value = '1'")
+        .run();
+    } else {
+      this.db.exec(FTS_TRIGGERS);
+    }
   }
 
   close(): void {
@@ -569,10 +633,11 @@ export class OmcStore {
     const limit = opts.limit ?? 20;
     const offset = opts.offset ?? 0;
     const { clause, params } = this.searchWhere(opts);
+    // snippet is computed in JS from full content: the FTS index holds
+    // CJK-expanded text whose offsets don't map back to the original string
     const sql = `
       SELECT m.id, m.session_id AS sessionId, m.role, m.content, m.content_type AS contentType,
-             m.created_at AS createdAt, s.source, s.cwd, s.title,
-             snippet(messages_fts, 0, '', '', ' … ', 12) AS snippet
+             m.created_at AS createdAt, s.source, s.cwd, s.title
       FROM messages_fts
       JOIN messages m ON m.rowid = messages_fts.rowid
       LEFT JOIN sessions s ON s.id = m.session_id
@@ -580,7 +645,8 @@ export class OmcStore {
       ORDER BY bm25(messages_fts)
       LIMIT ? OFFSET ?`;
     try {
-      return this.db.prepare(sql).all(match, ...params, limit, offset) as unknown as SearchHit[];
+      const rows = this.db.prepare(sql).all(match, ...params, limit, offset) as unknown as (Omit<SearchHit, 'snippet'>)[];
+      return rows.map((r) => ({ ...r, snippet: makeSnippet(r.content, query) }));
     } catch {
       return [];
     }

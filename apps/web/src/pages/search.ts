@@ -1,6 +1,6 @@
 import { api, type Overview, type SearchHit } from '../api';
 import type { Page } from '../page';
-import { emptyState, esc, fmtTime, highlight } from '../util';
+import { emptyState, esc, fmtTime, highlight, sourceBadge } from '../util';
 
 interface SearchParams {
   q: string;
@@ -21,7 +21,7 @@ function resultsHtml(hits: SearchHit[], q: string, total: number): string {
     hits
       .map(
         (h) => `<a class="hit-row" href="#/sessions/${h.sessionId}">
-          <span class="badge">${esc(h.source ?? '?')}</span>
+          ${sourceBadge(h.source ?? '?')}
           <span class="dim small">${esc(h.role)} · <span class="mono">${esc(fmtTime(h.createdAt))}</span> · ${esc(h.sessionTitle ?? h.sessionCwd ?? '')}</span><br />
           <span>${highlight(h.snippet, q)}</span>
         </a>`,
@@ -52,7 +52,7 @@ export const page: Page<SearchParams> = {
         <input type="search" id="q" placeholder="搜索所有 AI 的对话…" value="${esc(p.q)}" size="42" autofocus />
         <select id="sourceFilter">${options}</select>
       </div>
-      <div id="results">${hits === null ? '' : resultsHtml(hits, p.q, total)}</div>
+      <div id="results">${hits === null ? emptyState('输入关键词，搜索所有 AI 的对话。') : resultsHtml(hits, p.q, total)}</div>
     `;
 
     // interactive: debounce + abort in-flight; results render as soon as they land

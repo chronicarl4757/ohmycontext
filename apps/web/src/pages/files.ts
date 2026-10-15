@@ -44,7 +44,7 @@ export const page: Page<FilesParams> = {
         <select id="kindFilter">${kindOptions}</select>
         <input type="text" id="pathPrefix" placeholder="路径前缀过滤，如 /home/you/src" value="${esc(p.pathPrefix)}" size="34" />
       </div>
-      ${artifacts.length === 0 ? emptyState('暂无文件产物') : `
+      ${artifacts.length === 0 ? emptyState('还没有捕获到文件产物。') : `
       <table>
         <thead><tr><th>类型</th><th>路径 / URI</th><th>大小</th><th>时间</th><th>会话</th></tr></thead>
         <tbody>${rows}</tbody>

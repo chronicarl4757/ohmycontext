@@ -1,6 +1,6 @@
 import { api, type Overview, type SessionRow } from '../api';
 import type { Page } from '../page';
-import { emptyState, esc, fmtTime, hueFor, trunc } from '../util';
+import { emptyState, esc, fmtTime, sourceBadge, trunc } from '../util';
 
 const FLAT_PAGE = 50;
 
@@ -19,7 +19,7 @@ function rowHtml(s: SessionRow, showSource: boolean): string {
   const label = s.title ?? ((s.firstUserPreview ? trunc(s.firstUserPreview.replace(/\s+/g, ' '), 60) : '') || s.cwd || '(untitled)');
   return `<tr class="clickable" data-id="${s.id}">
     <td class="mono dim">${esc(fmtTime(s.startedAt))}</td>
-    ${showSource ? `<td><span class="badge" style="color: hsl(${hueFor(s.source)} 75% 72%)">${esc(s.source)}</span></td>` : ''}
+    ${showSource ? `<td>${sourceBadge(s.source)}</td>` : ''}
     <td>${esc(trunc(label, 80))}</td>
     <td class="mono">${s.messageCount}</td>
   </tr>`;
@@ -55,7 +55,7 @@ function groupedHtml(sessions: SessionRow[]): string {
       })
       .join('');
     sections.push(`<details class="source-group" open>
-      <summary><span class="badge" style="color: hsl(${hueFor(source)} 75% 72%)">${esc(source)}</span> <span class="dim small">${list.length} 个会话</span></summary>
+      <summary>${sourceBadge(source)} <span class="dim small">${list.length} 个会话</span></summary>
       ${groups}
     </details>`);
   }

@@ -5,6 +5,7 @@ import {
   normalizeClaudeConversation,
   normalizeDeepSeek,
   normalizeKimi,
+  normalizeKimiApiv2,
   type OmcEvent,
 } from '../lib/normalize';
 import { readChatGptToken, readDeepSeekToken, readKimiToken } from '../lib/tokens';
@@ -31,7 +32,17 @@ async function normalize(
   if (site === 'chatgpt') return normalizeChatGptConversation(data);
   if (site === 'claude') return normalizeClaudeConversation(data);
   if (site === 'deepseek') return normalizeDeepSeek({ messages: data, ...extra });
-  if (site === 'kimi') return normalizeKimi({ items: data, ...extra });
+  if (site === 'kimi') {
+    const d = data as Record<string, unknown> | null;
+    if (d && typeof d === 'object' && 'listMessages' in d) {
+      return normalizeKimiApiv2(
+        (d as { getChat?: unknown }).getChat ?? null,
+        (d as { listMessages?: unknown }).listMessages,
+        extra.chatId ?? '',
+      );
+    }
+    return normalizeKimi({ items: data, ...extra }); // legacy segment/scroll shape
+  }
   return [];
 }
 
@@ -85,17 +96,27 @@ async function captureNow(): Promise<{ ok: boolean; events: number }> {
       return { ok: true, events: await sendEvents(events, location.href) };
     }
     if (host.endsWith('kimi.com') || host.endsWith('kimi.moonshot.cn')) {
-      const m = /\/chat\/([0-9a-f-]{36})/.exec(page);
+      const m = /\/chat\/([0-9a-z]{8,64})/.exec(page);
       const token = readKimiToken();
       if (!m || !token) return { ok: false, events: 0 };
-      const res = await fetch(`/api/chat/${m[1]}/segment/scroll`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ last: 1000 }),
-      });
-      if (!res.ok) return { ok: false, events: 0 };
-      const events = await normalizeKimi({ items: await res.json(), chatId: m[1] });
+      const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+      const [listRes, chatRes] = await Promise.all([
+        fetch('/apiv2/kimi.gateway.chat.v1.ChatService/ListMessages', {
+          method: 'POST',
+          credentials: 'include',
+          headers,
+          body: JSON.stringify({ chat_id: m[1], page_size: 100 }),
+        }),
+        fetch('/apiv2/kimi.gateway.chat.v1.ChatService/GetChat', {
+          method: 'POST',
+          credentials: 'include',
+          headers,
+          body: JSON.stringify({ chat_id: m[1] }),
+        }),
+      ]);
+      if (!listRes.ok) return { ok: false, events: 0 };
+      const getChat = chatRes.ok ? await chatRes.json().catch(() => null) : null;
+      const events = await normalizeKimiApiv2(getChat, await listRes.json(), m[1]);
       return { ok: true, events: await sendEvents(events, location.href) };
     }
     return { ok: false, events: 0 };

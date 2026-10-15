@@ -1,15 +1,11 @@
 import { api, type Overview, type RecentSession } from '../api';
 import type { Page } from '../page';
-import { dayBucket, dayLabel, emptyState, esc, fmtBytes, hueFor, relTime, trunc } from '../util';
+import { dayBucket, dayLabel, emptyState, esc, fmtBytes, relTime, sourceColor, sourceBadge, trunc } from '../util';
 
 interface TimelineData {
   ov: Overview;
   sessions: RecentSession[];
   total: number;
-}
-
-function sourceBadge(source: string): string {
-  return `<span class="badge" style="color: hsl(${hueFor(source)} 75% 72%); border-color: hsl(${hueFor(source)} 45% 40%)">${esc(source)}</span>`;
 }
 
 export const page: Page<Record<string, never>> = {
@@ -29,7 +25,7 @@ export const page: Page<Record<string, never>> = {
     }
     let lastBucket = '';
     const cards = sessions
-      .map((s) => {
+      .map((s, i) => {
         const bucket = dayBucket(s.lastActivity);
         const header =
           bucket !== lastBucket
@@ -38,11 +34,11 @@ export const page: Page<Record<string, never>> = {
         lastBucket = bucket;
         const label = trunc(s.title ?? s.cwd ?? s.id.slice(0, 8), 60);
         const preview = s.lastMessagePreview ? trunc(s.lastMessagePreview.replace(/\s+/g, ' '), 150) : '';
-        const dateNote = bucket === '更早' ? `<span class="mono dim">${esc(dayLabel(s.lastActivity))}</span> ` : '';
-        return `${header}<a class="tl-card" href="#/sessions/${s.id}">
+        const delay = `${Math.min(i, 5) * 40}ms`;
+        return `${header}<a class="tl-card" href="#/sessions/${s.id}" style="--i: ${delay}; --node: ${sourceColor(s.source)}">
           <div class="tl-top">
             <span class="tl-time mono">${esc(relTime(s.lastActivity))}</span>
-            ${dateNote}${sourceBadge(s.source)}
+            ${sourceBadge(s.source)}
             <span class="tl-title">${esc(label)}</span>
             <span class="dim small">${s.messageCount} 条</span>
           </div>
@@ -52,8 +48,8 @@ export const page: Page<Record<string, never>> = {
       .join('');
     root.innerHTML = `
       ${strip}
-      <h2>动态 <span class="dim small">最近 30 天 · ${total} 个活跃会话</span></h2>
-      ${cards}
+      <h2>动态 <span class="small">最近 30 天 · ${total} 个活跃会话</span></h2>
+      <div class="tl-stream">${cards}</div>
       ${total > sessions.length ? `<p class="dim small">只显示最近 ${sessions.length} 个</p>` : ''}`;
   },
 };

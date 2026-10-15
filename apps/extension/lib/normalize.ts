@@ -57,6 +57,8 @@ interface PendingMessage {
   createdAt: string;
   model?: string;
   metadata?: Record<string, unknown>;
+  /** source-native parent id; resolved to an OMC message id in buildEvents */
+  parentNative?: string;
 }
 
 async function buildEvents(
@@ -100,6 +102,9 @@ async function buildEvents(
         contentType: m.contentType,
         createdAt: m.createdAt,
         ...(m.model ? { model: m.model } : {}),
+        ...(m.parentNative
+          ? { parentId: await sha256Hex(`message:${source}:${convId}:${m.parentNative}`) }
+          : {}),
         ...(m.metadata && Object.keys(m.metadata).length > 0 ? { metadata: m.metadata } : {}),
       },
     });
@@ -387,11 +392,94 @@ export async function normalizeDeepSeek(payload: unknown): Promise<OmcEvent[]> {
 // ---------- kimi.com / kimi.moonshot.cn ----------
 
 /**
- * Kimi scroll payload → OMC events. Accepts the raw POST
- * /api/chat/<id>/segment/scroll response `{items: [...]}` or a hook-wrapped
- * `{items: <response>, title?, chatId?}`. Prefers the flat `content` string;
- * falls back to contents.zones[].sections[] with view "cmpl" (answer text,
- * citation markers stripped); "k1" reasoning sections are skipped.
+ * Kimi 2026 Connect-RPC wire format (verified live 2026-10): POST
+ * /apiv2/kimi.gateway.chat.v1.ChatService/ListMessages →
+ * {messages: [{id, parentId, role, status, blocks: [{text: {content}}]}]},
+ * GetChat → {chat: {id, name}}. Message timestamps are not present on the wire;
+ * when absent we stamp capture time and mark metadata.timeApproximate.
+ */
+export async function normalizeKimiApiv2(
+  getChat: unknown,
+  listMessagesBody: unknown,
+  chatId: string,
+): Promise<OmcEvent[]> {
+  try {
+    if (!chatId || !listMessagesBody || typeof listMessagesBody !== 'object') return [];
+    const body = listMessagesBody as Record<string, unknown>;
+    const msgs = body.messages;
+    if (!Array.isArray(msgs)) return [];
+    const gc = getChat && typeof getChat === 'object' ? (getChat as Record<string, unknown>) : undefined;
+    const chat = gc?.chat && typeof gc.chat === 'object' ? (gc.chat as Record<string, unknown>) : undefined;
+    const title = str(chat?.name) ?? str(gc?.name);
+    const capturedAt = new Date().toISOString();
+
+    const pending: PendingMessage[] = [];
+    let skippedStatus = 0;
+    let anyRealTs = false;
+    for (const raw of msgs) {
+      try {
+        if (!raw || typeof raw !== 'object') continue;
+        const m = raw as Record<string, unknown>;
+        const nativeId = str(m.id);
+        if (!nativeId) continue;
+        const roleRaw = str(m.role);
+        const role: Role | null = roleRaw === 'user' ? 'user' : roleRaw === 'assistant' ? 'assistant' : null;
+        if (!role) continue;
+        const status = str(m.status);
+        if (status && status !== 'MESSAGE_STATUS_COMPLETED') {
+          skippedStatus++;
+          continue;
+        }
+        const blocks = Array.isArray(m.blocks) ? (m.blocks as Record<string, unknown>[]) : [];
+        const texts: string[] = [];
+        let skippedBlocks = 0;
+        for (const b of blocks) {
+          const t = b && typeof b === 'object' ? str((b.text as Record<string, unknown> | undefined)?.content) : undefined;
+          if (t) texts.push(t);
+          else skippedBlocks++;
+        }
+        const content = texts.join('\n');
+        if (!content.trim()) continue;
+        const realTs = anyIso(m.createdAt) ?? anyIso(m.created_at) ?? anyIso(m.createTime);
+        if (realTs) anyRealTs = true;
+        pending.push({
+          source: 'kimi-web',
+          convId: chatId,
+          nativeId,
+          role,
+          content,
+          contentType: 'text',
+          createdAt: realTs ?? capturedAt,
+          ...(str(m.parentId) ? { parentNative: str(m.parentId) } : {}),
+          metadata: {
+            ...(realTs ? {} : { timeApproximate: true }),
+            ...(skippedBlocks > 0 ? { skippedBlocks } : {}),
+          },
+        });
+      } catch {
+        // skip bad message
+      }
+    }
+    // wire order is chronological; only re-sort when real timestamps exist
+    if (anyRealTs) pending.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
+    const events = await buildEvents(
+      'kimi-web',
+      chatId,
+      { ...(title ? { title } : {}) },
+      pending,
+    );
+    if (skippedStatus > 0 && events[0]) {
+      events[0].data.metadata = { wire: 'apiv2', skippedMessages: skippedStatus };
+    }
+    return events;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Legacy (pre-2026) Kimi scroll payload → OMC events, kept as fallback for the
+ * old `{items: [...]}` shape. New captures go through normalizeKimiApiv2.
  */
 export async function normalizeKimi(payload: unknown): Promise<OmcEvent[]> {
   try {

@@ -22,15 +22,21 @@ const CHATGPT_STREAM_RE = /\/backend-api\/(?:f\/)?conversation\/?(\?|$)/;
 const CLAUDE_CONVERSATION_RE = /\/api\/organizations\/([^/?]+)\/chat_conversations\/([0-9a-f-]{36})/;
 const DEEPSEEK_HISTORY_RE = /\/api\/v0\/chat\/history_messages\?/;
 const DEEPSEEK_STREAM_RE = /\/api\/v0\/chat\/completion\/?(\?|$)/;
-const DEEPSEEK_PAGE_RE = /\/(?:a\/)?chat\/s\/([0-9a-f-]{36})/;
-const KIMI_SCROLL_RE = /\/api\/chat\/([0-9a-f-]{36})\/segment\/scroll/;
-const KIMI_STREAM_RE = /\/api\/chat\/([0-9a-f-]{36})\/completion\/stream/;
-const KIMI_INFO_RE = /\/api\/chat\/([0-9a-f-]{36})(?:\?|$)/;
+const DEEPSEEK_PAGE_RE = /\/(?:a\/)?chat\/s\/([0-9a-z]{8,64})/;
+// kimi 2026: Connect-RPC JSON POSTs under /apiv2 (verified against live traffic)
+const KIMI_LIST_MESSAGES_RE = /\/apiv2\/kimi\.gateway\.chat\.v1\.ChatService\/ListMessages/;
+const KIMI_GET_CHAT_RE = /\/apiv2\/kimi\.gateway\.chat\.v1\.ChatService\/GetChat/;
+const KIMI_STREAM_RE = /\/apiv2\/kimi\.gateway\.chat\.v1\.ChatService\/(Stream|Send|Complete)/;
+const KIMI_PAGE_RE = /\/chat\/([0-9a-z]{8,64})/;
 
 const sniffedAuth = new Map<Site, string>();
+const sniffedSessionId = new Map<Site, string>();
+const kimiTitles = new Map<string, string>();
 
 function currentSite(): Site | null {
-  return HOST_SITE[location.hostname] ?? null;
+  // real apps may live on www.<host> (kimi does) — normalize before lookup
+  const host = location.hostname.toLowerCase().replace(/^www\./, '');
+  return HOST_SITE[host] ?? null;
 }
 
 function post(payload: Record<string, unknown>): void {
@@ -53,18 +59,34 @@ function diag(site: Site, event: 'request' | 'captured' | 'error', detail: strin
 function sniffAuth(site: Site, headers: unknown): void {
   try {
     let auth: string | null = null;
-    if (headers instanceof Headers) auth = headers.get('authorization');
-    else if (Array.isArray(headers)) {
-      for (const [k, v] of headers) if (String(k).toLowerCase() === 'authorization') auth = String(v);
+    let sessionId: string | null = null;
+    const read = (k: string, v: unknown) => {
+      const key = k.toLowerCase();
+      if (key === 'authorization') auth = String(v);
+      else if (key === 'x-msh-session-id') sessionId = String(v);
+    };
+    if (headers instanceof Headers) {
+      read('authorization', headers.get('authorization'));
+      read('x-msh-session-id', headers.get('x-msh-session-id'));
+    } else if (Array.isArray(headers)) {
+      for (const [k, v] of headers) read(String(k), v);
     } else if (headers && typeof headers === 'object') {
-      for (const [k, v] of Object.entries(headers as Record<string, unknown>)) {
-        if (k.toLowerCase() === 'authorization') auth = String(v);
-      }
+      for (const [k, v] of Object.entries(headers as Record<string, unknown>)) read(k, v);
     }
     if (auth && auth.startsWith('Bearer ') && !sniffedAuth.has(site)) sniffedAuth.set(site, auth);
+    if (sessionId && !sniffedSessionId.has(site)) sniffedSessionId.set(site, sessionId);
   } catch {
     // ignore
   }
+}
+
+/** headers for kimi refetches: sniffed authorization + x-msh-session-id */
+function kimiAuthHeaders(auth: string | null): Record<string, string> {
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (auth) headers.authorization = auth;
+  const sessionId = sniffedSessionId.get('kimi');
+  if (sessionId) headers['x-msh-session-id'] = sessionId;
+  return headers;
 }
 
 async function getAuth(site: Site, origFetch: typeof fetch): Promise<string | null> {
@@ -148,32 +170,34 @@ async function refetch(site: Site, origFetch: typeof fetch, id: string, org?: st
       return;
     }
     if (site === 'kimi') {
-      const headers: Record<string, string> = { 'content-type': 'application/json' };
       const auth = await getAuth(site, origFetch);
-      if (auth) headers.authorization = auth;
-      const [scroll, info] = await Promise.all([
-        origFetch(`/api/chat/${id}/segment/scroll`, {
+      const headers = kimiAuthHeaders(auth);
+      const [listRes, chatRes] = await Promise.all([
+        origFetch(`/apiv2/kimi.gateway.chat.v1.ChatService/ListMessages`, {
           method: 'POST',
           credentials: 'include',
           headers,
-          body: JSON.stringify({ last: 1000 }),
+          body: JSON.stringify({ chat_id: id, page_size: 100 }),
         }),
-        origFetch(`/api/chat/${id}`, { credentials: 'include', headers }),
+        origFetch(`/apiv2/kimi.gateway.chat.v1.ChatService/GetChat`, {
+          method: 'POST',
+          credentials: 'include',
+          headers,
+          body: JSON.stringify({ chat_id: id }),
+        }),
       ]);
-      if (scroll.ok) {
-        const data = await scroll.json();
-        let title: string | undefined;
-        if (info.ok) {
+      if (listRes.ok && isJsonContentType(listRes.headers.get('content-type'))) {
+        let getChat: unknown = null;
+        if (chatRes.ok) {
           try {
-            const meta = (await info.json()) as Record<string, unknown>;
-            title = typeof meta.name === 'string' ? meta.name : undefined;
+            getChat = await chatRes.json();
           } catch {
             // title optional
           }
         }
-        await captureJsonPayload(site, data, { chatId: id, ...(title ? { title } : {}) });
+        await captureJsonPayload(site, { listMessages: await listRes.json(), getChat }, { chatId: id });
       } else {
-        diag(site, 'error', `refetch ${scroll.status}`);
+        diag(site, 'error', `refetch ${listRes.status}`);
       }
     }
   } catch (err) {
@@ -260,23 +284,56 @@ function onFetchResponse(
     return;
   }
 
-  // kimi
-  const scroll = KIMI_SCROLL_RE.exec(url);
-  if (scroll && method === 'POST' && isJsonContentType(res.headers.get('content-type'))) {
-    const id = scroll[1]!;
+  // kimi (apiv2 Connect-RPC)
+  if (KIMI_GET_CHAT_RE.test(url) && method === 'POST' && isJsonContentType(res.headers.get('content-type'))) {
+    const reqId = kimiChatIdFromBody(init?.body);
     void res
       .clone()
       .json()
-      .then((d) => void captureJsonPayload(site, d, { chatId: id }))
+      .then((d) => {
+        const name = (d as Record<string, unknown> | null)?.chat;
+        const title =
+          name && typeof name === 'object' ? (name as Record<string, unknown>).name : undefined;
+        if (reqId && typeof title === 'string') kimiTitles.set(reqId, title);
+      })
       .catch(() => {});
     return;
   }
-  const stream = KIMI_STREAM_RE.exec(url);
-  if (stream && method === 'POST') {
-    const id = stream[1]!;
+  if (KIMI_LIST_MESSAGES_RE.test(url)) {
+    diag(site, 'lm-branch', `${method}|${res.headers.get('content-type')}`);
+  }
+  if (KIMI_LIST_MESSAGES_RE.test(url) && method === 'POST' && isJsonContentType(res.headers.get('content-type'))) {
+    const chatId = kimiChatIdFromBody(init?.body) ?? KIMI_PAGE_RE.exec(location.pathname)?.[1];
+    void res
+      .clone()
+      .json()
+      .then((d) => {
+        diag(site, 'lm-json', `ok msgs=${Array.isArray((d as { messages?: unknown[] })?.messages) ? (d as { messages: unknown[] }).messages.length : '?'}`);
+        const cached = chatId ? kimiTitles.get(chatId) : undefined;
+        return captureJsonPayload(site, { listMessages: d, getChat: cached ? { chat: { name: cached } } : null }, {
+          ...(chatId ? { chatId } : {}),
+        });
+      })
+      .catch((e) => diag(site, 'lm-err', String(e).slice(0, 100)));
+    return;
+  }
+  if (KIMI_STREAM_RE.test(url) && method === 'POST') {
+    const chatId = kimiChatIdFromBody(init?.body) ?? KIMI_PAGE_RE.exec(location.pathname)?.[1];
     void drainStream(res.clone()?.body)
-      .then(() => refetch(site, origFetch, id))
+      .then(() => {
+        if (chatId) return refetch(site, origFetch, chatId);
+      })
       .catch(() => {});
+  }
+}
+
+function kimiChatIdFromBody(body: unknown): string | undefined {
+  try {
+    if (typeof body !== 'string') return undefined;
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    return typeof parsed.chat_id === 'string' ? parsed.chat_id : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -286,6 +343,7 @@ interface XhrMeta {
   method: string;
   url: string;
   auth?: string;
+  body?: unknown;
 }
 
 function installXhrHook(site: Site, origFetch: typeof fetch): void {
@@ -305,8 +363,11 @@ function installXhrHook(site: Site, origFetch: typeof fetch): void {
   };
   proto.setRequestHeader = function (this: XMLHttpRequest & { __omc?: XhrMeta }, k: string, v: string) {
     try {
-      if (this.__omc && k.toLowerCase() === 'authorization' && v.startsWith('Bearer ') && !sniffedAuth.has(site)) {
+      const key = k.toLowerCase();
+      if (this.__omc && key === 'authorization' && v.startsWith('Bearer ') && !sniffedAuth.has(site)) {
         sniffedAuth.set(site, v);
+      } else if (this.__omc && key === 'x-msh-session-id' && !sniffedSessionId.has(site)) {
+        sniffedSessionId.set(site, v);
       }
     } catch {
       // ignore
@@ -316,6 +377,7 @@ function installXhrHook(site: Site, origFetch: typeof fetch): void {
   proto.send = function (this: XMLHttpRequest & { __omc?: XhrMeta }, ...args: unknown[]) {
     const meta = this.__omc;
     if (meta) {
+      meta.body = args[0];
       try {
         const url = meta.url;
         const isApi =
@@ -323,24 +385,38 @@ function installXhrHook(site: Site, origFetch: typeof fetch): void {
           CLAUDE_CONVERSATION_RE.test(url) ||
           DEEPSEEK_STREAM_RE.test(url) ||
           DEEPSEEK_HISTORY_RE.test(url) ||
-          KIMI_SCROLL_RE.test(url) ||
+          KIMI_LIST_MESSAGES_RE.test(url) ||
+          KIMI_GET_CHAT_RE.test(url) ||
           KIMI_STREAM_RE.test(url);
         if (isApi) diag(site, 'request', `xhr ${meta.method} ${url}`);
-        const scroll = KIMI_SCROLL_RE.exec(url);
-        const stream = KIMI_STREAM_RE.exec(url);
-        if (scroll && meta.method === 'POST') {
-          const id = scroll[1]!;
+        if (KIMI_LIST_MESSAGES_RE.test(url) && meta.method === 'POST') {
+          const chatId = kimiChatIdFromBody(meta.body) ?? KIMI_PAGE_RE.exec(location.pathname)?.[1];
           this.addEventListener('load', () => {
             try {
-              captureJsonPayload(site, JSON.parse((this as XMLHttpRequest).responseText), { chatId: id });
+              const d = JSON.parse((this as XMLHttpRequest).responseText);
+              const cached = chatId ? kimiTitles.get(chatId) : undefined;
+              void captureJsonPayload(site, { listMessages: d, getChat: cached ? { chat: { name: cached } } : null }, {
+                ...(chatId ? { chatId } : {}),
+              });
             } catch {
               // not json
             }
           });
-        } else if (stream && meta.method === 'POST') {
-          const id = stream[1]!;
+        } else if (KIMI_GET_CHAT_RE.test(url) && meta.method === 'POST') {
+          const reqId = kimiChatIdFromBody(meta.body);
+          this.addEventListener('load', () => {
+            try {
+              const d = JSON.parse((this as XMLHttpRequest).responseText) as Record<string, unknown>;
+              const chat = d?.chat as Record<string, unknown> | undefined;
+              if (reqId && typeof chat?.name === 'string') kimiTitles.set(reqId, chat.name);
+            } catch {
+              // not json
+            }
+          });
+        } else if (KIMI_STREAM_RE.test(url) && meta.method === 'POST') {
+          const chatId = kimiChatIdFromBody(meta.body) ?? KIMI_PAGE_RE.exec(location.pathname)?.[1];
           this.addEventListener('loadend', () => {
-            void refetch(site, origFetch, id);
+            if (chatId) void refetch(site, origFetch, chatId);
           });
         }
       } catch {
@@ -359,6 +435,8 @@ function install(): void {
   w.__omcHooked = true;
   const site = currentSite();
   if (!site) return;
+  // heartbeat: lets the popup's Diagnostics tab prove the hook is alive on this host
+  diag(site, 'hook-active', location.hostname);
   const origFetch = window.fetch.bind(window);
 
   window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -376,7 +454,8 @@ function install(): void {
         CLAUDE_CONVERSATION_RE.test(url) ||
         DEEPSEEK_STREAM_RE.test(url) ||
         DEEPSEEK_HISTORY_RE.test(url) ||
-        KIMI_SCROLL_RE.test(url) ||
+        KIMI_LIST_MESSAGES_RE.test(url) ||
+        KIMI_GET_CHAT_RE.test(url) ||
         KIMI_STREAM_RE.test(url)
       ) {
         sniffAuth(site, headers);

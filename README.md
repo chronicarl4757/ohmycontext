@@ -1,9 +1,13 @@
 # ohmycontext
 
+![ohmycontext 动态时间线](docs/images/timeline.png)
+
 Local-first **personal AI context layer**. ohmycontext automatically captures your
 AI coding conversations from every tool you use, normalizes them into an open
 JSONL event format, stores them in a local SQLite database with full-text search,
 and lets you search and export everything. Your data never leaves your machine.
+
+> 中文用户手册（截图、扩展安装、MCP 注册、FAQ）见 [docs/USER_GUIDE.md](docs/USER_GUIDE.md)。
 
 ## Why
 
@@ -18,6 +22,10 @@ unifies it into one open, queryable, portable store that *you* own.
   designed to become a community standard.
 - **Incremental & idempotent**: byte-offset tailing of log files; re-imports and
   re-scans never create duplicates (events are deduplicated by stable ids).
+- **One-command UI**: `omc ui` opens a dark, quiet control-room view of
+  everything — timeline feed, full-text search, grouped sessions, files, relay.
+- **AI↔AI**: an MCP server (stdio + HTTP) lets any agent search your context,
+  and a local message bus lets agents leave each other notes.
 
 ## Install
 
@@ -170,10 +178,10 @@ backoff on the next success.
 
 | Site | Source name | Mechanism |
 | ---- | ----------- | --------- |
-| chatgpt.com | `chatgpt-web` | Bearer from `/api/auth/session` or sniffed; `backend-api/conversation/<id>` (mapping + flat variants) |
+| chatgpt.com | `chatgpt-web` | Bearer from `/api/auth/session` or sniffed; `backend-api/conversation/<id>` (mapping + flat variants; API chain verified live 2026-10) |
 | claude.ai | `claude-web` | cookie-auth `/api/organizations/<org>/chat_conversations/<id>` |
-| chat.deepseek.com | `deepseek-web` | Bearer from localStorage/sniffed; `history_messages` + parent-branch walk |
-| kimi.com / kimi.moonshot.cn | `kimi-web` | Bearer from localStorage/sniffed; `segment/scroll` (XHR + fetch hooked) |
+| chat.deepseek.com | `deepseek-web` | Bearer from localStorage/sniffed; `history_messages` + parent-branch walk (requires an unexpired login) |
+| kimi.com / kimi.moonshot.cn | `kimi-web` | 2026-10 verified live: apiv2 Connect-RPC (`ListMessages`/`GetChat`); fetch + XHR hooked |
 
 **Privacy:** everything stays on your machine — the only network target is your
 loopback daemon (`127.0.0.1:27182` by default, configurable in the popup).

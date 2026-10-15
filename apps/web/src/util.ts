@@ -26,11 +26,30 @@ export function trunc(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n)}…` : s;
 }
 
-/** deterministic pastel-ish hue per sender/source name */
+/** deterministic pastel-ish hue per sender name (bus senders only) */
 export function hueFor(name: string): number {
   let h = 0;
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % 360;
   return h;
+}
+
+const SOURCE_COLORS: Record<string, string> = {
+  codex: '#B48CF2',
+  'claude-code': '#E8825A',
+  'chatgpt-web': '#6FCF97',
+  'deepseek-web': '#5AA9E6',
+  'kimi-web': '#C98BDB',
+  'omc-bus': '#E8A54B',
+};
+
+/** the single source→color map: badges, timeline nodes, strip accents */
+export function sourceColor(source: string): string {
+  return SOURCE_COLORS[source] ?? '#8794A8';
+}
+
+export function sourceBadge(source: string): string {
+  const c = sourceColor(source);
+  return `<span class="badge" style="color: ${c}; border-color: ${c}55">${esc(source)}</span>`;
 }
 
 export function errorBanner(root: HTMLElement, err: unknown): void {

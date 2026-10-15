@@ -7,6 +7,8 @@ interface SiteDiag {
   captures: number;
   lastSuccess: number | null;
   lastError: string | null;
+  hookActiveAt?: number | null;
+  hookHost?: string | null;
 }
 
 function $(id: string): HTMLElement {
@@ -54,7 +56,7 @@ async function refreshDiag(): Promise<void> {
   const local = await browser.storage.local.get({ omcDiag: {} });
   const diag = local.omcDiag as Record<string, SiteDiag>;
   const host = $('diagSites');
-  const sites = Object.entries(diag);
+  const sites = Object.entries(diag).sort(([a], [b]) => (a === '_daemon' ? -1 : b === '_daemon' ? 1 : a < b ? -1 : 1));
   if (sites.length === 0) {
     host.innerHTML = '<div class="muted">no captures observed yet — open a supported AI chat and send a message</div>';
     return;
@@ -62,12 +64,16 @@ async function refreshDiag(): Promise<void> {
   host.innerHTML = sites
     .map(([site, d]) => {
       const lastOk = d.lastSuccess ? new Date(d.lastSuccess).toLocaleString() : 'never';
+      const hook = d.hookActiveAt
+        ? `hook active on ${escapeHtml(d.hookHost ?? '?')} since ${new Date(d.hookActiveAt).toLocaleString()}`
+        : 'no hook heartbeat seen';
       const reqs = d.requests.length
         ? d.requests.map((r) => `<div>${escapeHtml(r)}</div>`).join('')
         : '<div class="muted">no API requests seen</div>';
+      const title = site === '_daemon' ? 'daemon delivery' : site;
       return `<div class="site">
-        <h2>${escapeHtml(site)}</h2>
-        <div class="muted">captures: ${d.captures} · last delivery: ${escapeHtml(lastOk)}</div>
+        <h2>${escapeHtml(title)}</h2>
+        <div class="muted">${escapeHtml(hook)} · captures: ${d.captures} · last delivery: ${escapeHtml(lastOk)}</div>
         ${d.lastError ? `<div class="muted" style="color:#cf222e">last error: ${escapeHtml(d.lastError)}</div>` : ''}
         <div class="reqs">${reqs}</div>
       </div>`;

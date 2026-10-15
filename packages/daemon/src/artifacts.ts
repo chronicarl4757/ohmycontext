@@ -13,20 +13,16 @@ const DEBOUNCE_MS = 300;
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico', '.avif']);
 
 export function artifactDirs(): string[] {
-  const dirs: string[] = [];
-  const fallback = join(homedir(), 'Documents', 'ChatGPT');
-  if (existsSync(fallback)) dirs.push(fallback);
+  // when OMC_ARTIFACT_DIRS is set (even empty) it replaces the default dir list
   const env = process.env.OMC_ARTIFACT_DIRS;
-  if (env) {
-    for (const raw of env.split(':')) {
-      const dir = raw.trim();
-      if (dir && !dirs.includes(dir)) {
-        if (existsSync(dir)) dirs.push(dir);
-        // missing env dirs are silently skipped; the default is the only implicit one
-      }
-    }
+  if (env !== undefined) {
+    return env
+      .split(':')
+      .map((d) => d.trim())
+      .filter((d) => d.length > 0 && existsSync(d));
   }
-  return dirs;
+  const fallback = join(homedir(), 'Documents', 'ChatGPT');
+  return existsSync(fallback) ? [fallback] : [];
 }
 
 export function artifactKindFor(filePath: string): 'file' | 'image' | 'other' {
