@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { OMC_VERSION, type OmcStore } from '@ohmycontext/core';
+import { OMC_VERSION, buildDoctorReport, type OmcStore } from '@ohmycontext/core';
 import { createMcpServer } from '@ohmycontext/mcp';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 
@@ -176,6 +176,63 @@ export function createApp(deps: { store: OmcStore; startedAt: number; port: numb
 
   app.get('/bus/channels', (c) => c.json({ channels: store.listBusChannels() }));
 
+  // server-sent events: replay seq > after_seq, then stream new ones (500ms poll)
+  app.get('/bus/events', (c) => {
+    const afterSeq = intParam(c.req.query('after_seq')) ?? 0;
+    const encoder = new TextEncoder();
+    let cursor = afterSeq;
+    let poll: ReturnType<typeof setInterval> | null = null;
+    let ping: ReturnType<typeof setInterval> | null = null;
+    const stop = () => {
+      if (poll) clearInterval(poll);
+      if (ping) clearInterval(ping);
+      poll = null;
+      ping = null;
+    };
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const send = (m: unknown) =>
+          controller.enqueue(encoder.encode(`event: message\ndata: ${JSON.stringify(m)}\n\n`));
+        const tick = () => {
+          try {
+            const { messages, latestSeq } = store.readBusMessages({ afterSeq: cursor, limit: 500 });
+            for (const m of messages) send(m);
+            cursor = Math.max(cursor, latestSeq);
+          } catch {
+            // store busy/closed transiently; next tick retries
+          }
+        };
+        tick(); // replay backlog first
+        poll = setInterval(tick, 500);
+        ping = setInterval(() => {
+          try {
+            controller.enqueue(encoder.encode(':ping\n\n'));
+          } catch {
+            // closed
+          }
+        }, 15_000);
+        c.req.raw.signal.addEventListener('abort', () => {
+          stop();
+          try {
+            controller.close();
+          } catch {
+            // already closed
+          }
+        });
+      },
+      cancel() {
+        stop(); // client disconnected
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive',
+      },
+    });
+  });
+
   app.get('/health', (c) =>
     c.json({ ok: true, version: OMC_VERSION, uptimeSec: Math.floor((Date.now() - startedAt) / 1000) }),
   );
@@ -219,6 +276,8 @@ export function createApp(deps: { store: OmcStore; startedAt: number; port: numb
     overviewCache = { at: Date.now(), body };
     return new Response(body, { headers: { 'content-type': 'application/json' } });
   });
+
+  app.get('/api/doctor', async (c) => c.json(await buildDoctorReport(store, port)));
 
   app.get('/api/activity', (c) => {
     const minutes = intParam(c.req.query('minutes')) ?? 60;

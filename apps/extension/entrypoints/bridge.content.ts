@@ -98,25 +98,26 @@ async function captureNow(): Promise<{ ok: boolean; events: number }> {
     if (host.endsWith('kimi.com') || host.endsWith('kimi.moonshot.cn')) {
       const m = /\/chat\/([0-9a-z]{8,64})/.exec(page);
       const token = readKimiToken();
-      if (!m || !token) return { ok: false, events: 0 };
+      const chatId = m?.[1];
+      if (!chatId || !token) return { ok: false, events: 0 };
       const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
       const [listRes, chatRes] = await Promise.all([
         fetch('/apiv2/kimi.gateway.chat.v1.ChatService/ListMessages', {
           method: 'POST',
           credentials: 'include',
           headers,
-          body: JSON.stringify({ chat_id: m[1], page_size: 100 }),
+          body: JSON.stringify({ chat_id: chatId, page_size: 100 }),
         }),
         fetch('/apiv2/kimi.gateway.chat.v1.ChatService/GetChat', {
           method: 'POST',
           credentials: 'include',
           headers,
-          body: JSON.stringify({ chat_id: m[1] }),
+          body: JSON.stringify({ chat_id: chatId }),
         }),
       ]);
       if (!listRes.ok) return { ok: false, events: 0 };
       const getChat = chatRes.ok ? await chatRes.json().catch(() => null) : null;
-      const events = await normalizeKimiApiv2(getChat, await listRes.json(), m[1]);
+      const events = await normalizeKimiApiv2(getChat, await listRes.json(), chatId);
       return { ok: true, events: await sendEvents(events, location.href) };
     }
     return { ok: false, events: 0 };

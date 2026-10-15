@@ -47,6 +47,13 @@ pnpm install && pnpm build
 omc ui        # scans your logs, starts the daemon, opens the web UI
 ```
 
+Run the daemon at login (Linux, systemd --user):
+
+```sh
+omc service install   # writes ~/.config/systemd/user/ohmycontext.service
+omc service status    # unit + daemon state
+```
+
 That's the one-command path. CLI-only usage:
 
 ```sh

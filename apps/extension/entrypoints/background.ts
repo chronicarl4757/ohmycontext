@@ -14,10 +14,16 @@ const QUEUE_MAX_BYTES = 5 * 1024 * 1024;
 const FLUSH_DELAY_MS = 3000;
 const BACKOFF_MIN_MS = 5000;
 const BACKOFF_MAX_MS = 5 * 60 * 1000;
-const DIAG_RING = 20;
+const DIAG_RING = 30;
+
+interface DiagEntry {
+  time: string;
+  kind: string;
+  text: string;
+}
 
 interface SiteDiag {
-  requests: string[];
+  entries: DiagEntry[];
   captures: number;
   lastSuccess: number | null;
   lastError: string | null;
@@ -28,7 +34,7 @@ interface SiteDiag {
 type Diag = Record<string, SiteDiag>;
 
 function emptySiteDiag(): SiteDiag {
-  return { requests: [], captures: 0, lastSuccess: null, lastError: null, hookActiveAt: null, hookHost: null };
+  return { entries: [], captures: 0, lastSuccess: null, lastError: null, hookActiveAt: null, hookHost: null };
 }
 
 export default defineBackground(() => {
@@ -62,10 +68,11 @@ export default defineBackground(() => {
       const stored = await browser.storage.local.get({ [DIAG_KEY]: {} });
       const diag = stored[DIAG_KEY] as Diag;
       const d = (diag[site] ??= emptySiteDiag());
-      if (event === 'request') {
-        d.requests.push(`${new Date().toISOString().slice(11, 19)} ${detail}`);
-        if (d.requests.length > DIAG_RING) d.requests.splice(0, d.requests.length - DIAG_RING);
-      } else if (event === 'captured') {
+      d.entries ??= [];
+      // every kind goes into the ring; the popup renders them newest-first
+      d.entries.push({ time: new Date().toISOString().slice(11, 19), kind: event, text: detail });
+      if (d.entries.length > DIAG_RING) d.entries.splice(0, d.entries.length - DIAG_RING);
+      if (event === 'captured') {
         d.captures++;
         d.lastSuccess = Date.now();
       } else if (event === 'hook-active') {

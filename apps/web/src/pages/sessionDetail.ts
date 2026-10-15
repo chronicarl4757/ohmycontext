@@ -1,5 +1,6 @@
 import { api, type ArtifactRow, type MessageRow, type SessionRow } from '../api';
 import type { Page } from '../page';
+import { renderMarkdown } from '../markdown';
 import { emptyState, esc, fmtBytes, fmtTime } from '../util';
 
 const PAGE = 200;
@@ -45,8 +46,10 @@ export const page: Page<DetailParams> = {
         ${m.contentType !== 'text' ? `<span class="badge">${esc(m.contentType)}</span>` : ''}
       </div>`;
       const overlong = m.content.length > COLLAPSE_CHARS;
+      const markdown = m.contentType === 'text' && (m.role === 'user' || m.role === 'assistant');
       const shown = overlong ? `${m.content.slice(0, COLLAPSE_CHARS)}…` : m.content;
-      const body = `<div class="msg-body">${esc(shown)}</div>${overlong ? `<button class="ghost small show-more" data-idx="${idx}">展开全文</button>` : ''}`;
+      const bodyHtml = markdown ? renderMarkdown(shown) : esc(shown);
+      const body = `<div class="msg-body${markdown ? ' md' : ''}">${bodyHtml}</div>${overlong ? `<button class="ghost small show-more" data-idx="${idx}">展开全文</button>` : ''}`;
       const inner =
         m.contentType === 'text'
           ? body
@@ -62,7 +65,10 @@ export const page: Page<DetailParams> = {
         el.addEventListener('click', () => {
           const m = loaded[Number(el.dataset.idx)];
           const body = el.closest('.msg')?.querySelector('.msg-body');
-          if (m && body) body.textContent = m.content;
+          if (m && body) {
+            const markdown = m.contentType === 'text' && (m.role === 'user' || m.role === 'assistant');
+            body.innerHTML = markdown ? renderMarkdown(m.content) : esc(m.content);
+          }
           el.remove();
         });
       });

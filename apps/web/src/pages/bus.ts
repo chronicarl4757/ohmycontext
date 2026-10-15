@@ -1,4 +1,4 @@
-import { api, type BusChannel } from '../api';
+import { api, type BusChannel, type BusMessage } from '../api';
 import type { Page } from '../page';
 import { emptyState, esc, fmtTime, hueFor } from '../util';
 
@@ -8,31 +8,50 @@ interface BusParams {
   channel: string;
 }
 
+function messageHtml(m: BusMessage, fresh: boolean): string {
+  const hue = hueFor(m.sender);
+  const refs = m.refs && m.refs.length > 0 ? `<div class="refs">refs: ${esc(m.refs.join(', '))}</div>` : '';
+  return `<div class="bus-msg${fresh ? ' new' : ''}">
+    <span class="sender" style="color: hsl(${hue} 70% 70%)">${esc(m.sender)}</span>
+    <span class="mono dim small"> #${m.seq} · ${esc(fmtTime(m.createdAt))}</span>
+    <div class="msg-body">${esc(m.content)}</div>
+    ${refs}
+  </div>`;
+}
+
 export const page: Page<BusParams> = {
   key: () => 'relay:channels',
   load: async () => api.busChannels(),
   view(root, raw, p) {
     let activeChannel = p.channel;
     let cursor = 0;
-    let timer: ReturnType<typeof setInterval> | null = null;
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
+    let events: EventSource | null = null;
+    let visibilityHandler: (() => void) | null = null;
 
     const stopPolling = () => {
-      if (timer !== null) {
-        clearInterval(timer);
-        timer = null;
+      if (pollTimer !== null) {
+        clearInterval(pollTimer);
+        pollTimer = null;
       }
     };
-    const startPolling = () => {
+    const stopLive = () => {
       stopPolling();
-      if (!document.hidden) timer = setInterval(() => void loadMessages(true), POLL_MS);
-    };
-    const onVisibility = () => {
-      if (document.hidden) stopPolling();
-      else {
-        void loadMessages(true);
-        startPolling();
+      if (events) {
+        events.close();
+        events = null;
       }
     };
+
+    function appendMessages(messages: BusMessage[], fresh: boolean): void {
+      const pane = root.querySelector('#busMessages');
+      if (!pane) return;
+      for (const m of messages) {
+        if (m.seq <= cursor) continue; // SSE replays from after_seq boundary
+        pane.insertAdjacentHTML('beforeend', messageHtml(m, fresh));
+        cursor = Math.max(cursor, m.seq);
+      }
+    }
 
     async function loadMessages(incremental: boolean): Promise<void> {
       if (!activeChannel) return;
@@ -44,28 +63,38 @@ export const page: Page<BusParams> = {
           pane.innerHTML = '';
           cursor = 0;
         }
-        if (res.messages.length > 0) {
-          pane.insertAdjacentHTML(
-            'beforeend',
-            res.messages
-              .map((m) => {
-                const hue = hueFor(m.sender);
-                const refs =
-                  m.refs && m.refs.length > 0 ? `<div class="refs">refs: ${esc(m.refs.join(', '))}</div>` : '';
-                return `<div class="bus-msg">
-                  <span class="sender" style="color: hsl(${hue} 70% 70%)">${esc(m.sender)}</span>
-                  <span class="mono dim small"> #${m.seq} · ${esc(fmtTime(m.createdAt))}</span>
-                  <div class="msg-body">${esc(m.content)}</div>
-                  ${refs}
-                </div>`;
-              })
-              .join(''),
-          );
-        }
+        appendMessages(res.messages, false);
         cursor = Math.max(cursor, res.latestSeq);
       } catch {
-        // transient poll failure: keep the pane, retry next tick
+        // transient failure: keep the pane, retry via the live mechanism
       }
+    }
+
+    function startPolling(): void {
+      stopPolling();
+      if (!document.hidden) pollTimer = setInterval(() => void loadMessages(true), POLL_MS);
+    }
+
+    function startLive(): void {
+      stopLive();
+      if (!activeChannel || typeof EventSource === 'undefined') {
+        startPolling();
+        return;
+      }
+      const es = new EventSource(`/bus/events?after_seq=${cursor}`);
+      events = es;
+      es.addEventListener('message', (ev) => {
+        try {
+          appendMessages([JSON.parse((ev as MessageEvent).data as string) as BusMessage], true);
+        } catch {
+          // malformed event frame
+        }
+      });
+      es.onerror = () => {
+        es.close();
+        events = null;
+        startPolling(); // SSE unsupported / proxy dropped it → poll instead
+      };
     }
 
     async function renderChannels(channels: BusChannel[]): Promise<void> {
@@ -103,9 +132,15 @@ export const page: Page<BusParams> = {
         </div>
       </div>`;
     void renderChannels(channels);
-    if (activeChannel) void loadMessages(false);
-    startPolling();
-    document.addEventListener('visibilitychange', onVisibility);
+    if (activeChannel) {
+      void loadMessages(false).then(() => startLive());
+    }
+    // polling fallback still respects tab visibility; SSE itself is cheap
+    visibilityHandler = () => {
+      if (document.hidden) stopPolling();
+      else if (!events) startPolling();
+    };
+    document.addEventListener('visibilitychange', visibilityHandler);
 
     root.querySelector('#postBtn')?.addEventListener('click', async () => {
       const channel = (root.querySelector('#postChannel') as HTMLInputElement).value.trim();
@@ -124,9 +159,9 @@ export const page: Page<BusParams> = {
         if (channel !== activeChannel) {
           activeChannel = channel;
           cursor = 0;
+          stopLive();
           await loadMessages(false);
-        } else {
-          await loadMessages(true);
+          startLive();
         }
         void renderChannels((await api.busChannels()).channels);
       } catch (err) {
@@ -134,7 +169,6 @@ export const page: Page<BusParams> = {
       }
     });
 
-    // clicking a channel link swaps the pane in place without a full route render
     root.querySelector('#channelList')?.addEventListener('click', (e) => {
       const a = (e.target as HTMLElement).closest('a');
       if (!a) return;
@@ -147,12 +181,13 @@ export const page: Page<BusParams> = {
       (root.querySelector('#postChannel') as HTMLInputElement).value = activeChannel;
       root.querySelectorAll('#channelList a').forEach((el) => el.classList.remove('active'));
       a.classList.add('active');
-      void loadMessages(false);
+      stopLive();
+      void loadMessages(false).then(() => startLive());
     });
 
     return () => {
-      stopPolling();
-      document.removeEventListener('visibilitychange', onVisibility);
+      stopLive();
+      if (visibilityHandler) document.removeEventListener('visibilitychange', visibilityHandler);
     };
   },
 };

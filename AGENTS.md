@@ -110,9 +110,11 @@ session per channel), so it is searchable/exportable like everything else.
 
 ```sh
 doctor          # ✓/✗ human lines + hints; exit 1 if daemon down
-doctor --json   # structured report
+doctor --json   # structured report (identical to GET /api/doctor)
 stats           # totals, per-source counts, db size, time range
 stats --json    # {version, dbPath, dbBytes, totals, sources, earliest, latest}
+service status  # systemd unit + daemon reachability (install/uninstall exist;
+                # the unit auto-starts the daemon at login on Linux)
 ```
 
 ## MCP alternative

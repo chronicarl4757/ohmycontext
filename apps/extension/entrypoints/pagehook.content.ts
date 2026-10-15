@@ -47,7 +47,7 @@ function post(payload: Record<string, unknown>): void {
   }
 }
 
-function diag(site: Site, event: 'request' | 'captured' | 'error', detail: string): void {
+function diag(site: Site, event: string, detail: string): void {
   const redacted = detail
     .split('/')
     .map((seg) => (seg.length > 12 ? `${seg.slice(0, 8)}…` : seg))
@@ -58,12 +58,11 @@ function diag(site: Site, event: 'request' | 'captured' | 'error', detail: strin
 
 function sniffAuth(site: Site, headers: unknown): void {
   try {
-    let auth: string | null = null;
-    let sessionId: string | null = null;
+    const found: { auth?: string; sessionId?: string } = {};
     const read = (k: string, v: unknown) => {
       const key = k.toLowerCase();
-      if (key === 'authorization') auth = String(v);
-      else if (key === 'x-msh-session-id') sessionId = String(v);
+      if (key === 'authorization') found.auth = String(v);
+      else if (key === 'x-msh-session-id') found.sessionId = String(v);
     };
     if (headers instanceof Headers) {
       read('authorization', headers.get('authorization'));
@@ -73,8 +72,8 @@ function sniffAuth(site: Site, headers: unknown): void {
     } else if (headers && typeof headers === 'object') {
       for (const [k, v] of Object.entries(headers as Record<string, unknown>)) read(k, v);
     }
-    if (auth && auth.startsWith('Bearer ') && !sniffedAuth.has(site)) sniffedAuth.set(site, auth);
-    if (sessionId && !sniffedSessionId.has(site)) sniffedSessionId.set(site, sessionId);
+    if (found.auth?.startsWith('Bearer ') && !sniffedAuth.has(site)) sniffedAuth.set(site, found.auth);
+    if (found.sessionId && !sniffedSessionId.has(site)) sniffedSessionId.set(site, found.sessionId);
   } catch {
     // ignore
   }
@@ -229,6 +228,7 @@ function onFetchResponse(
       } catch {
         // no usable body
       }
+      diag(site, 'stream', url);
       void drainStream(res.clone()?.body, (chunk) => {
         if (!convId) {
           const m = /"conversation_id"\s*:\s*"([0-9a-f-]{36})"/.exec(chunk);
@@ -247,7 +247,8 @@ function onFetchResponse(
     const m = CLAUDE_CONVERSATION_RE.exec(url);
     if (!m) return;
     if (url.includes('/completion')) {
-      void drainStream(res.clone()?.body)
+      diag(site, 'stream', url);
+    void drainStream(res.clone()?.body)
         .then(() => refetch(site, origFetch, m[2]!, m[1]))
         .catch(() => {});
     } else if (method === 'GET' && isJsonContentType(res.headers.get('content-type'))) {
@@ -265,6 +266,7 @@ function onFetchResponse(
       } catch {
         // no usable body
       }
+      diag(site, 'stream', url);
       void drainStream(res.clone()?.body)
         .then(() => {
           const id = convId ?? DEEPSEEK_PAGE_RE.exec(location.pathname)?.[1];
@@ -319,6 +321,7 @@ function onFetchResponse(
   }
   if (KIMI_STREAM_RE.test(url) && method === 'POST') {
     const chatId = kimiChatIdFromBody(init?.body) ?? KIMI_PAGE_RE.exec(location.pathname)?.[1];
+    diag(site, 'stream', url);
     void drainStream(res.clone()?.body)
       .then(() => {
         if (chatId) return refetch(site, origFetch, chatId);

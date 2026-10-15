@@ -3,9 +3,10 @@ import { spawn } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { OMC_VERSION, OmcStore, type Session } from '@ohmycontext/core';
+import { OMC_VERSION, OmcStore, buildDoctorReport, type Session } from '@ohmycontext/core';
 import { DEFAULT_PORT, runDaemon } from '@ohmycontext/daemon';
 import { createMcpServer } from '@ohmycontext/mcp';
+import { registerServiceCommand } from './service.js';
 
 const program = new Command();
 
@@ -540,46 +541,8 @@ program
   .option('--json', 'emit the full structured report')
   .action(async (opts: { json?: boolean }) => {
     const port = Number(process.env.OMC_PORT) || DEFAULT_PORT;
-    let daemon: { ok?: boolean; version?: string; uptimeSec?: number } | null = null;
-    try {
-      const r = await fetch(`http://127.0.0.1:${port}/health`);
-      if (r.ok) daemon = (await r.json()) as typeof daemon;
-    } catch {
-      // daemon down
-    }
-    const report = await withStore(async (store) => {
-      const st = store.stats();
-      const now = Date.now();
-      const sync = store.syncStateSummary().map((s) => ({
-        source: s.source,
-        files: s.files,
-        lastMtime: s.lastMtime !== null ? new Date(s.lastMtime).toISOString() : null,
-        ageMinutes: s.lastMtime !== null ? Math.round((now - s.lastMtime) / 60_000) : null,
-      }));
-      const webSources = st.sources.filter((s) => s.source.endsWith('-web')).map((s) => s.source);
-      const hints: string[] = [];
-      if (!daemon) hints.push('daemon is down — run: omc watch (or omc ui)');
-      if (webSources.length === 0) {
-        hints.push('no web captures found — load the browser extension (docs/USER_GUIDE.md)');
-      }
-      for (const s of sync) {
-        if (!daemon && s.ageMinutes !== null && s.ageMinutes > 60) {
-          hints.push(`sync for '${s.source}' is stale (${s.ageMinutes} min) while daemon is down — run omc watch`);
-        }
-      }
-      return {
-        daemon,
-        port,
-        db: { path: st.dbPath, bytes: st.dbBytes, mebibytes: Math.round((st.dbBytes / 1024 / 1024) * 10) / 10 },
-        totals: st.totals,
-        earliest: st.earliest,
-        latest: st.latest,
-        sources: st.sources,
-        webSources,
-        sync,
-        hints,
-      };
-    });
+    const report = await withStore((store) => buildDoctorReport(store, port));
+    const daemon = report.daemon;
     if (opts.json) {
       console.log(JSON.stringify(report, null, 2));
     } else {
@@ -606,6 +569,8 @@ program
     }
     if (!daemon) process.exitCode = 1;
   });
+
+registerServiceCommand(program);
 
 await program.parseAsync(process.argv).catch((err: unknown) => {
   console.error(err instanceof Error ? err.message : String(err));

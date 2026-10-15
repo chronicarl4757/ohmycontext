@@ -2,14 +2,30 @@ import { browser } from 'wxt/browser';
 
 const DEFAULT_DAEMON_URL = 'http://127.0.0.1:27182';
 
+interface DiagEntry {
+  time: string;
+  kind: string;
+  text: string;
+}
+
 interface SiteDiag {
-  requests: string[];
+  entries?: DiagEntry[];
+  /** legacy field from older builds */
+  requests?: string[];
   captures: number;
   lastSuccess: number | null;
   lastError: string | null;
   hookActiveAt?: number | null;
   hookHost?: string | null;
 }
+
+const KIND_COLOR: Record<string, string> = {
+  request: '#666',
+  captured: '#1a7f37',
+  error: '#cf222e',
+  'hook-active': '#1a1a7f',
+  stream: '#7c5a10',
+};
 
 function $(id: string): HTMLElement {
   const el = document.getElementById(id);
@@ -29,11 +45,18 @@ async function refresh(): Promise<void> {
     omcDaemonUrl: DEFAULT_DAEMON_URL,
     omcCaptureEnabled: true,
   });
-  const local = await browser.storage.local.get({ omcEventsSent: 0, omcQueue: [] });
+  const local = await browser.storage.local.get({ omcEventsSent: 0, omcQueue: [], omcDiag: {} });
   ($('daemonUrl') as HTMLInputElement).value = String(sync.omcDaemonUrl);
   ($('enabled') as HTMLInputElement).checked = Boolean(sync.omcCaptureEnabled);
   $('sent').textContent = String(local.omcEventsSent ?? 0);
   $('queued').textContent = String(Array.isArray(local.omcQueue) ? local.omcQueue.length : 0);
+  const daemonDiag = (local.omcDiag as Record<string, SiteDiag>)._daemon;
+  const last = daemonDiag?.lastSuccess
+    ? `ok · ${new Date(daemonDiag.lastSuccess).toLocaleTimeString()}`
+    : daemonDiag?.lastError
+      ? `failed · ${daemonDiag.lastError}`
+      : '—';
+  $('lastDelivery').textContent = last;
 
   const dot = $('statusDot');
   const text = $('statusText');
@@ -67,15 +90,22 @@ async function refreshDiag(): Promise<void> {
       const hook = d.hookActiveAt
         ? `hook active on ${escapeHtml(d.hookHost ?? '?')} since ${new Date(d.hookActiveAt).toLocaleString()}`
         : 'no hook heartbeat seen';
-      const reqs = d.requests.length
-        ? d.requests.map((r) => `<div>${escapeHtml(r)}</div>`).join('')
-        : '<div class="muted">no API requests seen</div>';
+      const entries = (d.entries ?? [])
+        .slice()
+        .reverse()
+        .map(
+          (e) =>
+            `<div><span class="kind" style="color:${KIND_COLOR[e.kind] ?? '#666'}">${escapeHtml(e.kind)}</span> <span class="muted">${escapeHtml(e.time)}</span> ${escapeHtml(e.text)}</div>`,
+        )
+        .join('');
+      const legacyReqs = (d.requests ?? []).map((r) => `<div>${escapeHtml(r)}</div>`).join('');
+      const body = entries || legacyReqs || '<div class="muted">no API traffic seen</div>';
       const title = site === '_daemon' ? 'daemon delivery' : site;
       return `<div class="site">
         <h2>${escapeHtml(title)}</h2>
         <div class="muted">${escapeHtml(hook)} · captures: ${d.captures} · last delivery: ${escapeHtml(lastOk)}</div>
         ${d.lastError ? `<div class="muted" style="color:#cf222e">last error: ${escapeHtml(d.lastError)}</div>` : ''}
-        <div class="reqs">${reqs}</div>
+        <div class="reqs">${body}</div>
       </div>`;
     })
     .join('');

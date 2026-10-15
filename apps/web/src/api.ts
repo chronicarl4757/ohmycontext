@@ -119,6 +119,19 @@ export const api = {
   artifacts: (kind: string, pathPrefix: string, limit: number, offset: number) =>
     getJson<{ artifacts: ArtifactRow[]; total: number }>(`/api/artifacts${qs({ kind, pathPrefix, limit, offset })}`),
   busChannels: () => getJson<{ channels: BusChannel[] }>('/bus/channels'),
+  doctor: () =>
+    getJson<{
+      daemon: { ok: boolean; version?: string; uptimeSec?: number } | null;
+      port: number;
+      db: { path: string; bytes: number; mebibytes: number };
+      totals: { sessions: number; messages: number; artifacts: number; events: number };
+      earliest: string | null;
+      latest: string | null;
+      sources: SourceStat[];
+      webSources: string[];
+      sync: { source: string; files: number; lastMtime: string | null; ageMinutes: number | null }[];
+      hints: string[];
+    }>('/api/doctor'),
   busRead: (channel: string, afterSeq: number, limit = 500) =>
     getJson<{ messages: BusMessage[]; latestSeq: number; truncated: boolean }>(
       `/bus/read${qs({ channel, after_seq: afterSeq, limit })}`,

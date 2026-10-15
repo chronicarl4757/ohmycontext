@@ -7,6 +7,7 @@ import { page as searchPage } from './pages/search';
 import { page as chatsPage } from './pages/chats';
 import { page as filesPage } from './pages/files';
 import { page as busPage } from './pages/bus';
+import { page as statusPage } from './pages/status';
 import { page as sessionDetailPage } from './pages/sessionDetail';
 
 const ICONS: Record<string, string> = {
@@ -20,6 +21,8 @@ const ICONS: Record<string, string> = {
     '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2.5 4.5a2 2 0 0 1 2-2h2l1.5 2h4.5a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2z"/></svg>',
   relay:
     '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2.5 5.5h10m-2.7-2.7 2.7 2.7-2.7 2.7"/><path d="M13.5 10.5h-10m2.7 2.7-2.7-2.7 2.7-2.7"/></svg>',
+  status:
+    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 4.5v3.5l2.5 1.5"/></svg>',
 };
 
 const NAV = [
@@ -28,6 +31,7 @@ const NAV = [
   { path: '#/chats', zh: '会话', en: 'Chats', icon: ICONS.chats },
   { path: '#/files', zh: '文件', en: 'Files', icon: ICONS.files },
   { path: '#/bus', zh: '接力', en: 'Relay', icon: ICONS.relay },
+  { path: '#/status', zh: '状态', en: 'Status', icon: ICONS.status },
 ];
 
 const appEl = document.getElementById('app')!;
@@ -78,6 +82,8 @@ function resolve(hash: string): Resolved | { redirect: string } {
       };
     case '#/bus':
       return { page: busPage as Page<unknown>, params: { channel: query.get('channel') ?? '' } };
+    case '#/status':
+      return { page: statusPage as Page<unknown>, params: {} };
     default:
       return { page: timelinePage as Page<unknown>, params: {} };
   }

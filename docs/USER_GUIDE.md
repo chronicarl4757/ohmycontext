@@ -20,6 +20,9 @@ pnpm install
 pnpm build
 ```
 
+装完后建议注册开机自启（Linux，systemd --user）：`omc service install`
+（`omc service status` 查看状态，`omc service uninstall` 卸载）。
+
 ## 快速开始
 
 ```sh
