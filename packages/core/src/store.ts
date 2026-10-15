@@ -87,6 +87,7 @@ export interface SessionListOptions {
 
 export interface SessionSummary extends Session {
   messageCount: number;
+  firstUserPreview: string | null;
 }
 
 export interface RecentSession extends SessionSummary {
@@ -166,6 +167,7 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_session_role_created ON messages(session_id, role, created_at);
 
 CREATE TABLE IF NOT EXISTS artifacts (
   id TEXT PRIMARY KEY,
@@ -625,15 +627,25 @@ export class OmcStore {
     const { clause, params } = this.sessionWhere(opts);
     const rows = this.db
       .prepare(
-        `SELECT s.*, COUNT(m.id) AS message_count
+        `SELECT s.*, COUNT(m.id) AS message_count,
+           (SELECT substr(mu.content, 1, 160) FROM messages mu
+            WHERE mu.session_id = s.id AND mu.role = 'user'
+            ORDER BY mu.created_at, mu.rowid LIMIT 1) AS first_user_preview
          FROM sessions s LEFT JOIN messages m ON m.session_id = s.id
          ${clause}
          GROUP BY s.id
          ORDER BY s.started_at DESC
          LIMIT ? OFFSET ?`,
       )
-      .all(...params, limit, offset) as unknown as (SessionRow & { message_count: number })[];
-    return rows.map((r) => ({ ...rowToSession(r), messageCount: r.message_count }));
+      .all(...params, limit, offset) as unknown as (SessionRow & {
+      message_count: number;
+      first_user_preview: string | null;
+    })[];
+    return rows.map((r) => ({
+      ...rowToSession(r),
+      messageCount: r.message_count,
+      firstUserPreview: r.first_user_preview,
+    }));
   }
 
   sessionCount(opts: SessionListOptions = {}): number {
@@ -647,45 +659,48 @@ export class OmcStore {
   } {
     const limit = opts.limit ?? 20;
     const offset = opts.offset ?? 0;
-    const sourceClause = opts.source ? 'WHERE s.source = ?' : '';
-    const baseParams: (string | number)[] = opts.source ? [opts.source] : [];
-    const select = `
-      FROM sessions s JOIN messages m ON m.session_id = s.id
-      ${sourceClause}
-      GROUP BY s.id
-      HAVING MAX(m.created_at) >= ?`;
+    // aggregate only the window's messages (driven by idx_messages_created),
+    // then hydrate session rows + last-message previews via indexed lookups
+    // for the returned page only — never scan all messages per session
+    const sourceJoin = opts.source ? 'JOIN sessions s0 ON s0.id = m.session_id AND s0.source = ?' : '';
+    // INDEXED BY: the planner otherwise picks idx_messages_session for the
+    // GROUP BY and scans every message ever, ignoring the tiny time window
+    const agg = `FROM messages m INDEXED BY idx_messages_created ${sourceJoin} WHERE m.created_at >= ? GROUP BY m.session_id`;
+    const baseParams: (string | number)[] = opts.source ? [opts.source, opts.since] : [opts.since];
     const total = (
-      this.db.prepare(`SELECT COUNT(*) AS c FROM (SELECT s.id ${select})`).get(...baseParams, opts.since) as {
-        c: number;
-      }
+      this.db.prepare(`SELECT COUNT(*) AS c FROM (SELECT m.session_id ${agg})`).get(...baseParams) as { c: number }
     ).c;
     const rows = this.db
       .prepare(
-        `SELECT s.*, COUNT(m.id) AS message_count, MAX(m.created_at) AS last_activity,
-           (SELECT substr(m2.content, 1, 240) FROM messages m2
-            WHERE m2.session_id = s.id ORDER BY m2.created_at DESC, m2.rowid DESC LIMIT 1) AS last_message_preview,
-           (SELECT m3.role FROM messages m3
-            WHERE m3.session_id = s.id ORDER BY m3.created_at DESC, m3.rowid DESC LIMIT 1) AS last_message_role
-         ${select}
+        `SELECT m.session_id AS sid, COUNT(*) AS window_count, MAX(m.created_at) AS last_activity
+         ${agg}
          ORDER BY last_activity DESC
          LIMIT ? OFFSET ?`,
       )
-      .all(...baseParams, opts.since, limit, offset) as unknown as (SessionRow & {
-      message_count: number;
+      .all(...baseParams, limit, offset) as unknown as {
+      sid: string;
+      window_count: number;
       last_activity: string;
-      last_message_preview: string | null;
-      last_message_role: string | null;
-    })[];
-    return {
-      sessions: rows.map((r) => ({
-        ...rowToSession(r),
-        messageCount: r.message_count,
+    }[];
+    const sessStmt = this.db.prepare('SELECT * FROM sessions WHERE id = ?');
+    const lastStmt = this.db.prepare(
+      'SELECT role, substr(content, 1, 240) AS preview FROM messages WHERE session_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1',
+    );
+    const sessions: RecentSession[] = [];
+    for (const r of rows) {
+      const s = sessStmt.get(r.sid) as SessionRow | undefined;
+      if (!s) continue;
+      const last = lastStmt.get(r.sid) as { role: string; preview: string | null } | undefined;
+      sessions.push({
+        ...rowToSession(s),
+        messageCount: r.window_count,
+        firstUserPreview: null,
         lastActivity: r.last_activity,
-        lastMessageRole: r.last_message_role,
-        lastMessagePreview: r.last_message_preview,
-      })),
-      total,
-    };
+        lastMessageRole: last?.role ?? null,
+        lastMessagePreview: last?.preview ?? null,
+      });
+    }
+    return { sessions, total };
   }
 
   resolveSessionId(idOrPrefix: string): string | null {

@@ -184,8 +184,8 @@ send `v > 1` envelopes to a `v = 1` consumer.
 - New sources are introduced simply by emitting events with a new `source`
   string; no registry is required. Sources SHOULD be lowercase, hyphenated.
   Sources emitted by the reference implementation: `claude-code`, `codex`
-  (CLI log connectors), `chatgpt-web`, `claude-web` (browser extension),
-  `omc-bus` (message-bus mirror, §8.2).
+  (CLI log connectors), `chatgpt-web`, `claude-web`, `deepseek-web`,
+  `kimi-web` (browser extension), `omc-bus` (message-bus mirror, §8.2).
 - New entity fields: producers MAY add fields; consumers MUST ignore unknown
   fields (they MAY strip them when normalizing into storage).
 - New envelope `type`s MUST be ignored by `v = 1` consumers.

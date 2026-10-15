@@ -4,7 +4,7 @@ export interface OmcEvent {
   data: Record<string, unknown>;
 }
 
-export type WebSource = 'chatgpt-web' | 'claude-web';
+export type WebSource = 'chatgpt-web' | 'claude-web' | 'deepseek-web' | 'kimi-web';
 
 export async function sha256Hex(input: string): Promise<string> {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
@@ -17,6 +17,10 @@ function str(v: unknown): string | undefined {
   return typeof v === 'string' ? v : undefined;
 }
 
+function num(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+
 function isoFromEpochSeconds(v: unknown): string | undefined {
   if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) return undefined;
   return new Date(v * 1000).toISOString();
@@ -26,6 +30,11 @@ function isoFromString(v: unknown): string | undefined {
   if (typeof v !== 'string') return undefined;
   const t = Date.parse(v);
   return Number.isNaN(t) ? undefined : new Date(t).toISOString();
+}
+
+/** accepts epoch seconds or ISO strings */
+function anyIso(v: unknown): string | undefined {
+  return isoFromEpochSeconds(v) ?? isoFromString(v);
 }
 
 function minIso(a: string | undefined, b: string): string {
@@ -98,85 +107,115 @@ async function buildEvents(
   return events;
 }
 
+// ---------- chatgpt.com ----------
+
+const CHATGPT_SKIP_CONTENT_TYPES = new Set([
+  'thoughts',
+  'reasoning_recap',
+  'tether_quote',
+  'tether_browsing_code',
+  'tether_browsing_display',
+  'user_editable_context',
+  'model_editable_context',
+]);
+
+function chatGptMessage(source: WebSource, convId: string, m: Record<string, unknown>): PendingMessage | null {
+  const nativeId = str(m.id);
+  if (!nativeId) return null;
+  const author = m.author as Record<string, unknown> | undefined;
+  const roleRaw = str(author?.role) ?? str(m.role);
+  const role: Role | null =
+    roleRaw === 'user' || roleRaw === 'assistant' || roleRaw === 'system' || roleRaw === 'tool' ? roleRaw : null;
+  if (!role) return null;
+  const createdAt = anyIso(m.create_time) ?? anyIso(m.created_at);
+  if (!createdAt) return null;
+  const meta = m.metadata as Record<string, unknown> | undefined;
+  if (meta?.is_visually_hidden_from_conversation === true || meta?.is_thinking_preamble_message === true) {
+    return null;
+  }
+  const modelSlug = str(meta?.model_slug);
+  const content = m.content as Record<string, unknown> | undefined;
+  const ctype = str(content?.content_type) ?? 'text';
+  let text = '';
+  let contentType: PendingMessage['contentType'] = 'text';
+  let skippedBlocks = 0;
+  if ((ctype === 'text' || ctype === 'multimodal_text') && Array.isArray(content?.parts)) {
+    const parts = content.parts as unknown[];
+    text = parts.filter((p): p is string => typeof p === 'string').join('\n');
+    skippedBlocks = parts.length - parts.filter((p) => typeof p === 'string').length;
+  } else if (ctype === 'code') {
+    contentType = 'tool_use';
+    text = str(content?.text) ?? '';
+  } else if (ctype === 'execution_output') {
+    contentType = 'tool_result';
+    text = str(content?.text) ?? '';
+  } else if (CHATGPT_SKIP_CONTENT_TYPES.has(ctype)) {
+    return null;
+  } else {
+    return null;
+  }
+  if (!text.trim()) return null;
+  return {
+    source,
+    convId,
+    nativeId,
+    role,
+    content: text,
+    contentType,
+    createdAt,
+    ...(modelSlug ? { model: modelSlug } : {}),
+    metadata: { webContentType: ctype, ...(skippedBlocks > 0 ? { skippedBlocks } : {}) },
+  };
+}
+
 /**
- * chatgpt.com GET /backend-api/conversation/<id> response → OMC events.
- * Shape reference: pionxzh/chatgpt-exporter src/api.ts (mapping tree of nodes
- * with message.author.role / content.content_type+parts / metadata.model_slug).
+ * chatgpt.com conversation → OMC events. Two wire variants exist:
+ * legacy `{mapping: {<nodeId>: {message}}}` (walk all nodes) and the 2026 flat
+ * `{messages: [...]}`. Timestamps may be epoch seconds or ISO strings.
+ * Shape reference: pionxzh/chatgpt-exporter src/api.ts.
  */
 export async function normalizeChatGptConversation(json: unknown): Promise<OmcEvent[]> {
   try {
     if (!json || typeof json !== 'object') return [];
     const root = json as Record<string, unknown>;
     const convId = str(root.conversation_id) ?? str(root.id);
-    const mapping = root.mapping;
-    if (!convId || !mapping || typeof mapping !== 'object') return [];
+    if (!convId) return [];
     const pending: PendingMessage[] = [];
     const seen = new Set<string>();
     let model: string | undefined;
-    for (const node of Object.values(mapping)) {
-      try {
-        const msg = (node as Record<string, unknown> | null)?.message;
-        if (!msg || typeof msg !== 'object') continue;
-        const m = msg as Record<string, unknown>;
-        const nativeId = str(m.id);
-        if (!nativeId || seen.has(nativeId)) continue;
-        const author = m.author as Record<string, unknown> | undefined;
-        const roleRaw = str(author?.role);
-        const role: Role | null =
-          roleRaw === 'user' || roleRaw === 'assistant' || roleRaw === 'system' || roleRaw === 'tool'
-            ? roleRaw
-            : null;
-        if (!role) continue;
-        const createdAt = isoFromEpochSeconds(m.create_time);
-        if (!createdAt) continue;
-        const meta = m.metadata as Record<string, unknown> | undefined;
-        if (meta?.is_visually_hidden_from_conversation === true) continue;
-        const modelSlug = str(meta?.model_slug);
-        if (modelSlug && role === 'assistant') model ??= modelSlug;
-        const content = m.content as Record<string, unknown> | undefined;
-        const ctype = str(content?.content_type) ?? 'text';
-        let text = '';
-        let contentType: PendingMessage['contentType'] = 'text';
-        let skippedBlocks = 0;
-        if ((ctype === 'text' || ctype === 'multimodal_text') && Array.isArray(content?.parts)) {
-          const parts = content.parts as unknown[];
-          text = parts.filter((p): p is string => typeof p === 'string').join('\n');
-          skippedBlocks = parts.length - parts.filter((p) => typeof p === 'string').length;
-        } else if (ctype === 'code') {
-          contentType = 'tool_use';
-          text = str(content?.text) ?? '';
-        } else if (ctype === 'execution_output') {
-          contentType = 'tool_result';
-          text = str(content?.text) ?? '';
-        } else {
-          // thoughts / reasoning_recap / tether_* / user_editable_context …
-          continue;
+    const rawMessages: Record<string, unknown>[] = [];
+    const mapping = root.mapping;
+    if (mapping && typeof mapping === 'object') {
+      for (const node of Object.values(mapping)) {
+        try {
+          const msg = (node as Record<string, unknown> | null)?.message;
+          if (msg && typeof msg === 'object') rawMessages.push(msg as Record<string, unknown>);
+        } catch {
+          // skip bad node
         }
-        if (!text.trim()) continue;
-        seen.add(nativeId);
-        pending.push({
-          source: 'chatgpt-web',
-          convId,
-          nativeId,
-          role,
-          content: text,
-          contentType,
-          createdAt,
-          ...(modelSlug ? { model: modelSlug } : {}),
-          metadata: {
-            webContentType: ctype,
-            ...(skippedBlocks > 0 ? { skippedBlocks } : {}),
-          },
-        });
+      }
+    } else if (Array.isArray(root.messages)) {
+      for (const m of root.messages) {
+        if (m && typeof m === 'object') rawMessages.push(m as Record<string, unknown>);
+      }
+    }
+    if (rawMessages.length === 0) return [];
+    for (const m of rawMessages) {
+      try {
+        const p = chatGptMessage('chatgpt-web', convId, m);
+        if (!p || seen.has(p.nativeId)) continue;
+        seen.add(p.nativeId);
+        if (p.model && p.role === 'assistant') model ??= p.model;
+        pending.push(p);
       } catch {
-        // one bad node must not lose the conversation
+        // one bad message must not lose the conversation
       }
     }
     pending.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
     return buildEvents('chatgpt-web', convId, {
       ...(str(root.title) ? { title: str(root.title) } : {}),
-      startedAt: isoFromEpochSeconds(root.create_time),
-      endedAt: isoFromEpochSeconds(root.update_time),
+      startedAt: anyIso(root.create_time),
+      endedAt: anyIso(root.update_time),
       ...(model ? { model } : {}),
     }, pending);
   } catch {
@@ -184,10 +223,11 @@ export async function normalizeChatGptConversation(json: unknown): Promise<OmcEv
   }
 }
 
+// ---------- claude.ai ----------
+
 /**
  * claude.ai GET /api/organizations/<org>/chat_conversations/<id> response →
- * OMC events. Shape: {uuid, name, created_at, updated_at, model,
- * chat_messages: [{uuid, sender, created_at, content: [{type, text}]}]}.
+ * OMC events: {uuid, name, created_at, updated_at, model, chat_messages:[...]}.
  */
 export async function normalizeClaudeConversation(json: unknown): Promise<OmcEvent[]> {
   try {
@@ -254,6 +294,169 @@ export async function normalizeClaudeConversation(json: unknown): Promise<OmcEve
       endedAt: isoFromString(root.updated_at),
       ...(convModel ? { model: convModel } : {}),
     }, pending);
+  } catch {
+    return [];
+  }
+}
+
+// ---------- chat.deepseek.com ----------
+
+/**
+ * DeepSeek history payload → OMC events. Accepts the raw
+ * GET /api/v0/chat/history_messages response or `{messages: <response>,
+ * title?, chatId?}` as wrapped by the page hook. The visible branch is
+ * reconstructed by walking parent_id from chat_session.current_message_id.
+ */
+export async function normalizeDeepSeek(payload: unknown): Promise<OmcEvent[]> {
+  try {
+    if (!payload || typeof payload !== 'object') return [];
+    const p = payload as Record<string, unknown>;
+    const resp = (p.messages && typeof p.messages === 'object' ? p.messages : p) as Record<string, unknown>;
+    const data = resp.data as Record<string, unknown> | undefined;
+    const biz = data?.biz_data as Record<string, unknown> | undefined;
+    if (!biz) return [];
+    const chatSession = biz.chat_session as Record<string, unknown> | undefined;
+    const rawMsgs = biz.chat_messages;
+    if (!Array.isArray(rawMsgs)) return [];
+    const convId = str(chatSession?.id) ?? str(p.chatId);
+    if (!convId) return [];
+
+    const byId = new Map<string, Record<string, unknown>>();
+    for (const m of rawMsgs) {
+      if (m && typeof m === 'object') {
+        const id = str((m as Record<string, unknown>).message_id);
+        if (id) byId.set(id, m as Record<string, unknown>);
+      }
+    }
+    const chain: Record<string, unknown>[] = [];
+    let cur = str(chatSession?.current_message_id);
+    for (let guard = 0; cur && byId.has(cur) && guard < 10_000; guard++) {
+      const m = byId.get(cur)!;
+      chain.unshift(m);
+      cur = str(m.parent_id);
+    }
+    const ordered = chain.length > 0 ? chain : (rawMsgs as Record<string, unknown>[]);
+
+    const pending: PendingMessage[] = [];
+    for (const m of ordered) {
+      try {
+        const nativeId = str(m.message_id);
+        if (!nativeId) continue;
+        const roleRaw = str(m.role);
+        const role: Role | null = roleRaw === 'USER' ? 'user' : roleRaw === 'ASSISTANT' ? 'assistant' : null;
+        if (!role) continue;
+        const createdAt = anyIso(m.inserted_at);
+        if (!createdAt) continue;
+        const fragments = Array.isArray(m.fragments) ? (m.fragments as Record<string, unknown>[]) : [];
+        const texts: string[] = [];
+        let thinkSecs: number | undefined;
+        for (const f of fragments) {
+          const ft = str(f?.type);
+          if (ft === 'REQUEST' || ft === 'RESPONSE') {
+            const t = str(f.content);
+            if (t) texts.push(t);
+          } else if (ft === 'THINK') {
+            thinkSecs ??= num(f.elapsed_secs);
+          }
+        }
+        const text = texts.join('\n');
+        if (!text.trim()) continue;
+        pending.push({
+          source: 'deepseek-web',
+          convId,
+          nativeId,
+          role,
+          content: text,
+          contentType: 'text',
+          createdAt,
+          ...(thinkSecs !== undefined ? { metadata: { thinkingSecs: thinkSecs } } : {}),
+        });
+      } catch {
+        // skip bad message
+      }
+    }
+    return buildEvents('deepseek-web', convId, {
+      ...(str(p.title) ? { title: str(p.title) } : {}),
+      ...(str(chatSession?.title) ? { title: str(chatSession?.title) } : {}),
+    }, pending);
+  } catch {
+    return [];
+  }
+}
+
+// ---------- kimi.com / kimi.moonshot.cn ----------
+
+/**
+ * Kimi scroll payload → OMC events. Accepts the raw POST
+ * /api/chat/<id>/segment/scroll response `{items: [...]}` or a hook-wrapped
+ * `{items: <response>, title?, chatId?}`. Prefers the flat `content` string;
+ * falls back to contents.zones[].sections[] with view "cmpl" (answer text,
+ * citation markers stripped); "k1" reasoning sections are skipped.
+ */
+export async function normalizeKimi(payload: unknown): Promise<OmcEvent[]> {
+  try {
+    if (!payload || typeof payload !== 'object') return [];
+    const p = payload as Record<string, unknown>;
+    const resp = (p.items && typeof p.items === 'object' && !Array.isArray(p.items) ? p.items : p) as Record<
+      string,
+      unknown
+    >;
+    const items = Array.isArray(resp.items) ? (resp.items as Record<string, unknown>[]) : null;
+    if (!items) return [];
+    const convId = str(p.chatId) ?? str(resp.id);
+    if (!convId) return [];
+    const pending: PendingMessage[] = [];
+    const seen = new Set<string>();
+    for (const item of items) {
+      try {
+        if (!item || typeof item !== 'object') continue;
+        const nativeId = str(item.id);
+        if (!nativeId || seen.has(nativeId)) continue;
+        const roleRaw = str(item.role);
+        const role: Role | null = roleRaw === 'user' ? 'user' : roleRaw === 'assistant' ? 'assistant' : null;
+        if (!role) continue;
+        const createdAt = anyIso(item.created_at);
+        if (!createdAt) continue;
+        let text = str(item.content) ?? '';
+        let skippedZones = 0;
+        if (!text.trim()) {
+          const zones = (item.contents as Record<string, unknown> | undefined)?.zones;
+          if (Array.isArray(zones)) {
+            const texts: string[] = [];
+            for (const z of zones) {
+              const sections = (z as Record<string, unknown>)?.sections;
+              if (!Array.isArray(sections)) continue;
+              for (const sec of sections) {
+                const view = str((sec as Record<string, unknown>)?.view);
+                if (view === 'cmpl') {
+                  const t = str((sec as Record<string, unknown>).text) ?? str((sec as Record<string, unknown>).content);
+                  if (t) texts.push(t.replace(/\[citation:\d+\]/g, ''));
+                } else {
+                  skippedZones++;
+                }
+              }
+            }
+            text = texts.join('\n');
+          }
+        }
+        if (!text.trim()) continue;
+        seen.add(nativeId);
+        pending.push({
+          source: 'kimi-web',
+          convId,
+          nativeId,
+          role,
+          content: text,
+          contentType: 'text',
+          createdAt,
+          ...(skippedZones > 0 ? { metadata: { skippedZones } } : {}),
+        });
+      } catch {
+        // skip bad item
+      }
+    }
+    pending.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
+    return buildEvents('kimi-web', convId, { ...(str(p.title) ? { title: str(p.title) } : {}) }, pending);
   } catch {
     return [];
   }

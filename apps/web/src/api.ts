@@ -36,6 +36,7 @@ export interface SessionRow {
   endedAt?: string;
   model?: string;
   messageCount: number;
+  firstUserPreview?: string | null;
 }
 
 export interface MessageRow {
@@ -110,8 +111,11 @@ export const api = {
     getJson<{ session: SessionRow | null; messages: MessageRow[]; total: number; artifacts: ArtifactRow[] }>(
       `/api/sessions/${id}${qs({ limit, offset })}`,
     ),
-  search: (q: string, source: string, limit: number, offset: number) =>
-    getJson<{ hits: SearchHit[]; total: number }>(`/api/search${qs({ q, source, limit, offset })}`),
+  search: (q: string, source: string, limit: number, offset: number, signal?: AbortSignal) =>
+    fetch(`/api/search${qs({ q, source, limit, offset })}`, { signal }).then((res) => {
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      return res.json() as Promise<{ hits: SearchHit[]; total: number }>;
+    }),
   artifacts: (kind: string, pathPrefix: string, limit: number, offset: number) =>
     getJson<{ artifacts: ArtifactRow[]; total: number }>(`/api/artifacts${qs({ kind, pathPrefix, limit, offset })}`),
   busChannels: () => getJson<{ channels: BusChannel[] }>('/bus/channels'),

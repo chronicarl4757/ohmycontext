@@ -9,3 +9,4 @@ dist/
 *.db-shm
 .env
 coverage/
+screenshots/

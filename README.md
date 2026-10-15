@@ -148,23 +148,32 @@ then register `https://<your-tunnel-host>/mcp` as the MCP server URL.
 The daemon is loopback-only *and* additionally guards every route: the Host
 header must be `127.0.0.1`/`localhost` (DNS-rebinding protection); requests
 with an Origin header are 403 unless it is a browser-extension origin
-(`chrome-extension://`, `moz-extension://`, `safari-web-extension://`), which
-keeps random websites from reading or posting while letting the extension
-work; POST bodies must be JSON/NDJSON (no cross-origin simple forms).
-Origin-less local tools (curl, node, MCP clients) are unaffected.
+(`chrome-extension://`, `moz-extension://`, `safari-web-extension://`) or the
+daemon's own web-UI origin, which keeps random websites from reading or
+posting while letting the extension and the local UI work; POST bodies must be
+JSON/NDJSON (no cross-origin simple forms). Origin-less local tools (curl,
+node, MCP clients) are unaffected.
 
 ## M2 · Web capture (browser extension) + artifact watching
 
 ### Browser extension (`apps/extension`)
 
 A Manifest-V3 extension (built with WXT, vanilla TS) that auto-captures
-conversations while you chat on **chatgpt.com** and **claude.ai**. A page-world
-hook observes the site's own backend API responses (no DOM scraping); after any
-streaming reply completes it refetches the full conversation JSON, normalizes it
-into open-format events, and the background worker POSTs JSONL batches to the
+conversations while you chat on AI web apps. A page-world hook observes the
+site's own backend API responses (no DOM scraping) — it sniffs the site's
+Authorization headers and falls back to documented token sources, refetches
+the full conversation after any streaming reply completes, normalizes it into
+open-format events, and the background worker POSTs JSONL batches to the
 daemon's `POST /ingest`. Re-sends are free (the daemon dedupes by id). If the
-daemon is offline, events queue locally (FIFO, ~5MB cap) and flush with backoff
-on the next success.
+daemon is offline, events queue locally (FIFO, ~5MB cap) and flush with
+backoff on the next success.
+
+| Site | Source name | Mechanism |
+| ---- | ----------- | --------- |
+| chatgpt.com | `chatgpt-web` | Bearer from `/api/auth/session` or sniffed; `backend-api/conversation/<id>` (mapping + flat variants) |
+| claude.ai | `claude-web` | cookie-auth `/api/organizations/<org>/chat_conversations/<id>` |
+| chat.deepseek.com | `deepseek-web` | Bearer from localStorage/sniffed; `history_messages` + parent-branch walk |
+| kimi.com / kimi.moonshot.cn | `kimi-web` | Bearer from localStorage/sniffed; `segment/scroll` (XHR + fetch hooked) |
 
 **Privacy:** everything stays on your machine — the only network target is your
 loopback daemon (`127.0.0.1:27182` by default, configurable in the popup).
@@ -178,15 +187,18 @@ pnpm install && pnpm build          # produces apps/extension/.output/chrome-mv3
 then in Chrome/Edge: `chrome://extensions` → enable **Developer mode** →
 **Load unpacked** → select `apps/extension/.output/chrome-mv3`.
 
-The popup shows daemon connectivity, events sent/queued counters, a capture
-on/off toggle, the daemon URL, and a "capture this tab" button.
+The popup has two tabs: **Status** (daemon connectivity, sent/queued counters,
+capture toggle, daemon URL, "capture this tab") and **Diagnostics** (per-site
+ring buffer of intercepted API request paths, capture counts, last successful
+delivery, last error, plus a "copy diagnostics" button — send that JSON when
+reporting a silent site).
 
-Verification status: the normalization core, daemon ingest path, queueing
-logic, and the extension build are verified (see repo history); live capture
-against the real chatgpt.com/claude.ai frontends needs dogfooding — site APIs
-change without notice, so the fetch hooks in
-`apps/extension/entrypoints/pagehook.content.ts` are the first thing to check
-if capture stops.
+Dogfood status: normalizers, auth fallbacks, queueing, and the ingest path are
+verified against synthetic payloads matching current exporter-confirmed API
+shapes; live capture needs real accounts. If a site stays silent, open the
+popup's Diagnostics tab — you should at least see the site's own API requests
+listed; if you don't, the URL matchers in `entrypoints/pagehook.content.ts`
+need updating.
 
 ### Artifact directory watching
 

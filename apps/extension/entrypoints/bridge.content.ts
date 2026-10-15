@@ -1,14 +1,37 @@
 import { defineContentScript } from 'wxt/utils/define-content-script';
 import { browser } from 'wxt/browser';
-import { normalizeChatGptConversation, normalizeClaudeConversation, type OmcEvent } from '../lib/normalize';
+import {
+  normalizeChatGptConversation,
+  normalizeClaudeConversation,
+  normalizeDeepSeek,
+  normalizeKimi,
+  type OmcEvent,
+} from '../lib/normalize';
+import { readChatGptToken, readDeepSeekToken, readKimiToken } from '../lib/tokens';
 
-// Isolated-world bridge: receives raw site payloads from the MAIN-world
-// pagehook via postMessage, normalizes them into OMC events, and relays them
-// to the background worker (which owns the network path to the daemon).
+// Isolated-world bridge: receives site payloads + diagnostics from the
+// MAIN-world pagehook via postMessage, normalizes payloads into OMC events,
+// and relays everything to the background worker.
 
-async function normalize(site: string, data: unknown): Promise<OmcEvent[]> {
+const MATCHES = [
+  '*://chatgpt.com/*',
+  '*://claude.ai/*',
+  '*://chat.deepseek.com/*',
+  '*://kimi.com/*',
+  '*://*.kimi.com/*',
+  '*://kimi.moonshot.cn/*',
+  '*://*.kimi.moonshot.cn/*',
+];
+
+async function normalize(
+  site: string,
+  data: unknown,
+  extra: { chatId?: string; title?: string },
+): Promise<OmcEvent[]> {
   if (site === 'chatgpt') return normalizeChatGptConversation(data);
   if (site === 'claude') return normalizeClaudeConversation(data);
+  if (site === 'deepseek') return normalizeDeepSeek({ messages: data, ...extra });
+  if (site === 'kimi') return normalizeKimi({ items: data, ...extra });
   return [];
 }
 
@@ -25,22 +48,54 @@ async function captureNow(): Promise<{ ok: boolean; events: number }> {
     if (host.endsWith('chatgpt.com')) {
       const m = /\/c\/([0-9a-f-]{36})/.exec(page);
       if (!m) return { ok: false, events: 0 };
-      const res = await fetch(`/backend-api/conversation/${m[1]}`, { credentials: 'include' });
+      const token = await readChatGptToken(fetch);
+      const res = await fetch(`/backend-api/conversation/${m[1]}`, {
+        credentials: 'include',
+        headers: token ? { authorization: `Bearer ${token}` } : {},
+      });
       if (!res.ok) return { ok: false, events: 0 };
-      const events = await normalizeChatGptConversation(await res.json());
-      return { ok: true, events: await sendEvents(events, location.href) };
+      return { ok: true, events: await sendEvents(await normalizeChatGptConversation(await res.json()), location.href) };
     }
     if (host.endsWith('claude.ai')) {
       const m = /\/chat\/([0-9a-f-]{36})/.exec(page);
       if (!m) return { ok: false, events: 0 };
       const orgs = (await (await fetch('/api/organizations', { credentials: 'include' })).json()) as unknown;
-      const org = Array.isArray(orgs) && orgs[0] && typeof orgs[0] === 'object'
-        ? (orgs[0] as Record<string, unknown>).uuid
-        : undefined;
+      const org =
+        Array.isArray(orgs) && orgs[0] && typeof orgs[0] === 'object'
+          ? (orgs[0] as Record<string, unknown>).uuid
+          : undefined;
       if (typeof org !== 'string') return { ok: false, events: 0 };
-      const res = await fetch(`/api/organizations/${org}/chat_conversations/${m[1]}?tree=True&rendering_mode=messages&render_all_tools=true`, { credentials: 'include' });
+      const res = await fetch(
+        `/api/organizations/${org}/chat_conversations/${m[1]}?tree=True&rendering_mode=messages&render_all_tools=true`,
+        { credentials: 'include' },
+      );
       if (!res.ok) return { ok: false, events: 0 };
-      const events = await normalizeClaudeConversation(await res.json());
+      return { ok: true, events: await sendEvents(await normalizeClaudeConversation(await res.json()), location.href) };
+    }
+    if (host.endsWith('chat.deepseek.com')) {
+      const m = /\/(?:a\/)?chat\/s\/([0-9a-f-]{36})/.exec(page);
+      const token = readDeepSeekToken();
+      if (!m || !token) return { ok: false, events: 0 };
+      const res = await fetch(`/api/v0/chat/history_messages?chat_session_id=${m[1]}`, {
+        credentials: 'include',
+        headers: { authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return { ok: false, events: 0 };
+      const events = await normalizeDeepSeek({ messages: await res.json(), chatId: m[1] });
+      return { ok: true, events: await sendEvents(events, location.href) };
+    }
+    if (host.endsWith('kimi.com') || host.endsWith('kimi.moonshot.cn')) {
+      const m = /\/chat\/([0-9a-f-]{36})/.exec(page);
+      const token = readKimiToken();
+      if (!m || !token) return { ok: false, events: 0 };
+      const res = await fetch(`/api/chat/${m[1]}/segment/scroll`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ last: 1000 }),
+      });
+      if (!res.ok) return { ok: false, events: 0 };
+      const events = await normalizeKimi({ items: await res.json(), chatId: m[1] });
       return { ok: true, events: await sendEvents(events, location.href) };
     }
     return { ok: false, events: 0 };
@@ -50,7 +105,7 @@ async function captureNow(): Promise<{ ok: boolean; events: number }> {
 }
 
 export default defineContentScript({
-  matches: ['*://chatgpt.com/*', '*://claude.ai/*'],
+  matches: MATCHES,
   runAt: 'document_start',
   main() {
     let enabled = true;
@@ -65,12 +120,24 @@ export default defineContentScript({
 
     window.addEventListener('message', (ev) => {
       if (ev.source !== window) return;
-      const d = ev.data as { source?: string; site?: string; pageUrl?: string; data?: unknown } | null;
+      const d = ev.data as
+        | { source?: string; kind?: string; site?: string; pageUrl?: string; data?: unknown; chatId?: string; title?: string; event?: string; detail?: string }
+        | null;
       if (!d || d.source !== 'omc-pagehook' || typeof d.site !== 'string') return;
+      if (d.kind === 'diag') {
+        void browser.runtime
+          .sendMessage({ type: 'omc-diag', site: d.site, event: d.event, detail: d.detail })
+          .catch(() => {});
+        return;
+      }
       void (async () => {
         if (!enabled) return;
         try {
-          await sendEvents(await normalize(d.site as string, d.data), String(d.pageUrl ?? ''));
+          const events = await normalize(d.site as string, d.data, {
+            ...(typeof d.chatId === 'string' ? { chatId: d.chatId } : {}),
+            ...(typeof d.title === 'string' ? { title: d.title } : {}),
+          });
+          await sendEvents(events, String(d.pageUrl ?? ''));
         } catch {
           // background gone (extension reloaded); drop silently
         }

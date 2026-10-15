@@ -9,29 +9,85 @@ import { browser } from 'wxt/browser';
 const DEFAULT_DAEMON_URL = 'http://127.0.0.1:27182';
 const QUEUE_KEY = 'omcQueue';
 const SENT_KEY = 'omcEventsSent';
+const DIAG_KEY = 'omcDiag';
 const QUEUE_MAX_BYTES = 5 * 1024 * 1024;
 const FLUSH_DELAY_MS = 3000;
 const BACKOFF_MIN_MS = 5000;
 const BACKOFF_MAX_MS = 5 * 60 * 1000;
+const DIAG_RING = 20;
+
+interface SiteDiag {
+  requests: string[];
+  captures: number;
+  lastSuccess: number | null;
+  lastError: string | null;
+}
+
+type Diag = Record<string, SiteDiag>;
+
+function emptySiteDiag(): SiteDiag {
+  return { requests: [], captures: 0, lastSuccess: null, lastError: null };
+}
 
 export default defineBackground(() => {
   let pending: string[] = [];
+  let pendingSources = new Set<string>();
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let backoffMs = BACKOFF_MIN_MS;
   let flushing = false;
 
   browser.runtime.onMessage.addListener((msg: unknown) => {
-    const m = msg as { type?: string; events?: unknown[] } | null;
+    const m = msg as { type?: string; events?: unknown[]; site?: string; event?: string; detail?: string } | null;
+    if (m?.type === 'omc-diag' && typeof m.site === 'string' && typeof m.event === 'string') {
+      void recordDiag(m.site, m.event, typeof m.detail === 'string' ? m.detail : '');
+      return;
+    }
     if (m?.type !== 'omc-events' || !Array.isArray(m.events)) return;
     for (const e of m.events) {
       try {
         pending.push(JSON.stringify(e));
+        const source = (e as { data?: { source?: string } } | null)?.data?.source;
+        if (typeof source === 'string') pendingSources.add(source);
       } catch {
         // unserializable event; drop it
       }
     }
     scheduleFlush(FLUSH_DELAY_MS);
   });
+
+  async function recordDiag(site: string, event: string, detail: string): Promise<void> {
+    try {
+      const stored = await browser.storage.local.get({ [DIAG_KEY]: {} });
+      const diag = stored[DIAG_KEY] as Diag;
+      const d = (diag[site] ??= emptySiteDiag());
+      if (event === 'request') {
+        d.requests.push(`${new Date().toISOString().slice(11, 19)} ${detail}`);
+        if (d.requests.length > DIAG_RING) d.requests.splice(0, d.requests.length - DIAG_RING);
+      } else if (event === 'captured') {
+        d.captures++;
+        d.lastSuccess = Date.now();
+      } else if (event === 'error') {
+        d.lastError = detail;
+      }
+      await browser.storage.local.set({ [DIAG_KEY]: diag });
+    } catch {
+      // diagnostics must never break capture
+    }
+  }
+
+  async function noteFlushSuccess(sources: Set<string>): Promise<void> {
+    try {
+      const stored = await browser.storage.local.get({ [DIAG_KEY]: {} });
+      const diag = stored[DIAG_KEY] as Diag;
+      for (const source of sources) {
+        const d = (diag[source] ??= emptySiteDiag());
+        d.lastSuccess = Date.now();
+      }
+      await browser.storage.local.set({ [DIAG_KEY]: diag });
+    } catch {
+      // diagnostics must never break capture
+    }
+  }
 
   function scheduleFlush(delay: number): void {
     if (flushTimer !== null) return;
@@ -69,13 +125,15 @@ export default defineBackground(() => {
       await browser.storage.local.set({ [QUEUE_KEY]: [] });
       const sent = await browser.storage.local.get({ [SENT_KEY]: 0 });
       await browser.storage.local.set({ [SENT_KEY]: Number(sent[SENT_KEY] ?? 0) + lines.length });
+      await noteFlushSuccess(pendingSources);
+      pendingSources = new Set();
     } catch {
       const queued = await getQueue();
       const all = [...queued, ...pending];
       pending = [];
       let bytes = all.reduce((n, l) => n + l.length + 1, 0);
       while (bytes > QUEUE_MAX_BYTES && all.length > 0) {
-        bytes -= all[0].length + 1;
+        bytes -= (all[0]?.length ?? 0) + 1;
         all.shift();
       }
       await browser.storage.local.set({ [QUEUE_KEY]: all });

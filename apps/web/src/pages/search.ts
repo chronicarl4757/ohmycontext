@@ -1,57 +1,93 @@
-import { api } from '../api';
-import { emptyState, errorBanner, esc, fmtTime, highlight, loading } from '../util';
+import { api, type Overview, type SearchHit } from '../api';
+import type { Page } from '../page';
+import { emptyState, esc, fmtTime, highlight } from '../util';
 
-export async function renderSearch(root: HTMLElement, query: URLSearchParams): Promise<void> {
-  const q = query.get('q') ?? '';
-  const source = query.get('source') ?? '';
-  try {
+interface SearchParams {
+  q: string;
+  source: string;
+}
+
+interface SearchData {
+  ov: Overview;
+  q: string;
+  hits: SearchHit[] | null;
+  total: number;
+}
+
+function resultsHtml(hits: SearchHit[], q: string, total: number): string {
+  if (hits.length === 0) return emptyState(`没有找到「${esc(q)}」`);
+  return (
+    `<p class="dim small">${total} 条结果${total > hits.length ? `，显示前 ${hits.length} 条` : ''}</p>` +
+    hits
+      .map(
+        (h) => `<a class="hit-row" href="#/sessions/${h.sessionId}">
+          <span class="badge">${esc(h.source ?? '?')}</span>
+          <span class="dim small">${esc(h.role)} · <span class="mono">${esc(fmtTime(h.createdAt))}</span> · ${esc(h.sessionTitle ?? h.sessionCwd ?? '')}</span><br />
+          <span>${highlight(h.snippet, q)}</span>
+        </a>`,
+      )
+      .join('')
+  );
+}
+
+export const page: Page<SearchParams> = {
+  key: (p) => `search:${p.q}:${p.source}`,
+  load: async (p) => {
     const ov = await api.overview();
+    if (!p.q.trim()) return { ov, q: p.q, hits: null, total: 0 } satisfies SearchData;
+    const res = await api.search(p.q, p.source, 50, 0);
+    return { ov, q: p.q, hits: res.hits, total: res.total } satisfies SearchData;
+  },
+  view(root, raw, p) {
+    const { ov, hits, total } = raw as SearchData;
     const options = [
-      `<option value="">all sources</option>`,
+      `<option value="">全部来源</option>`,
       ...ov.sources.map(
-        (s) => `<option value="${esc(s.source)}"${s.source === source ? ' selected' : ''}>${esc(s.source)}</option>`,
+        (s) => `<option value="${esc(s.source)}"${s.source === p.source ? ' selected' : ''}>${esc(s.source)}</option>`,
       ),
     ].join('');
     root.innerHTML = `
-      <h2>Search</h2>
+      <h2>搜索</h2>
       <div class="toolbar">
-        <input type="search" id="q" placeholder="search every captured conversation…" value="${esc(q)}" size="42" />
+        <input type="search" id="q" placeholder="搜索所有 AI 的对话…" value="${esc(p.q)}" size="42" autofocus />
         <select id="sourceFilter">${options}</select>
-        <button id="go">search</button>
       </div>
-      <div id="results"></div>
+      <div id="results">${hits === null ? '' : resultsHtml(hits, p.q, total)}</div>
     `;
-    const submit = () => {
-      const nq = (root.querySelector('#q') as HTMLInputElement).value.trim();
-      const ns = (root.querySelector('#sourceFilter') as HTMLSelectElement).value;
-      const params = new URLSearchParams();
-      if (nq) params.set('q', nq);
-      if (ns) params.set('source', ns);
-      location.hash = `#/search${params.size ? `?${params}` : ''}`;
-    };
-    root.querySelector('#go')?.addEventListener('click', submit);
-    root.querySelector('#q')?.addEventListener('keydown', (e) => {
-      if ((e as KeyboardEvent).key === 'Enter') submit();
-    });
-    root.querySelector('#sourceFilter')?.addEventListener('change', submit);
-    if (!q) return;
+
+    // interactive: debounce + abort in-flight; results render as soon as they land
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    let inflight: AbortController | null = null;
+    const input = root.querySelector('#q') as HTMLInputElement;
+    const select = root.querySelector('#sourceFilter') as HTMLSelectElement;
     const results = root.querySelector('#results')!;
-    loading(results);
-    const res = await api.search(q, source, 50, 0);
-    results.innerHTML =
-      res.hits.length === 0
-        ? emptyState(`no matches for "${esc(q)}"`)
-        : `<p class="dim small">${res.total} hit(s)${res.total > res.hits.length ? `, showing first ${res.hits.length}` : ''}</p>` +
-          res.hits
-            .map(
-              (h) => `<a class="hit-row" href="#/sessions/${h.sessionId}">
-                <span class="badge">${esc(h.source ?? '?')}</span>
-                <span class="dim small">${esc(h.role)} · <span class="mono">${esc(fmtTime(h.createdAt))}</span> · ${esc(h.sessionTitle ?? h.sessionCwd ?? '')}</span><br />
-                <span>${highlight(h.snippet, q)}</span>
-              </a>`,
-            )
-            .join('');
-  } catch (err) {
-    errorBanner(root, err);
-  }
-}
+    const runSearch = () => {
+      const q = input.value.trim();
+      const src = select.value;
+      history.replaceState(null, '', `#/search${q ? `?q=${encodeURIComponent(q)}${src ? `&source=${encodeURIComponent(src)}` : ''}` : src ? `?source=${encodeURIComponent(src)}` : ''}`);
+      if (inflight) inflight.abort();
+      if (!q) {
+        results.innerHTML = '';
+        return;
+      }
+      const ac = new AbortController();
+      inflight = ac;
+      void api
+        .search(q, src, 50, 0, ac.signal)
+        .then((res) => {
+          if (ac.signal.aborted) return;
+          results.innerHTML = resultsHtml(res.hits, q, res.total);
+        })
+        .catch(() => {});
+    };
+    input.addEventListener('input', () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(runSearch, 300);
+    });
+    select.addEventListener('change', runSearch);
+    return () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      if (inflight) inflight.abort();
+    };
+  },
+};

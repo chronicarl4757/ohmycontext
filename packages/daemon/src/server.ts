@@ -210,7 +210,15 @@ export function createApp(deps: { store: OmcStore; startedAt: number; port: numb
 
   // --- read-only JSON API for the web UI (mirrors the MCP tool shapes) ---
 
-  app.get('/api/overview', (c) => c.json(store.stats()));
+  let overviewCache: { at: number; body: string } | null = null;
+  app.get('/api/overview', (c) => {
+    if (overviewCache && Date.now() - overviewCache.at < 5000) {
+      return new Response(overviewCache.body, { headers: { 'content-type': 'application/json' } });
+    }
+    const body = JSON.stringify(store.stats());
+    overviewCache = { at: Date.now(), body };
+    return new Response(body, { headers: { 'content-type': 'application/json' } });
+  });
 
   app.get('/api/activity', (c) => {
     const minutes = intParam(c.req.query('minutes')) ?? 60;
