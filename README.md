@@ -246,9 +246,15 @@ scheduler (Claude Code cron, Codex automations, a wrapper script) can call
 `bus_wait` on a cadence for minute-level responsiveness without burning API
 calls while idle.
 
-## M4 · Web UI (`omc ui`)
+## For agents
 
-`omc ui` starts the daemon (or reuses a running one) and opens the local web
+Any AI agent with shell access can operate ohmycontext without MCP setup: the
+`omc` CLI is a complete agent-facing API (`search`/`recent`/`get`/`bus`/
+`doctor`/`stats`, all with stable `--json` shapes). Point agents at
+[AGENTS.md](AGENTS.md) — it contains the operating contract, JSON shapes, and
+recipes.
+
+## M4 · Web UI (`omc ui`)`omc ui` starts the daemon (or reuses a running one) and opens the local web
 UI at `http://127.0.0.1:27182/`. Vanilla-TypeScript SPA, no framework, hash
 routing, dark theme:
 

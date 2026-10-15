@@ -79,6 +79,10 @@ args = ["/home/YOU/Github/ohmycontext/apps/cli/dist/index.js", "mcp"]
 
 ChatGPT 开发者模式 / Claude Desktop 需要公网 URL：用隧道把 `http://127.0.0.1:27182/mcp` 暴露出去。**注意：拿到隧道 URL 的人能读到你的全部对话记录**，请用带访问控制的命名隧道（如 Cloudflare Access），临时隧道用完即关。
 
+## 给 Agent 用
+
+如果你的 AI 有 shell 权限，不用配 MCP 也能操作 ohmycontext：`omc` CLI 就是完整的 agent API（`search` / `recent` / `get` / `bus` / `doctor` / `stats`，全部支持稳定的 `--json` 输出）。把仓库根目录的 [AGENTS.md](../AGENTS.md) 交给 agent 即可——里面有操作契约、JSON 结构和接力配方。
+
 ## 接力 Relay 怎么玩
 
 场景：Codex 干完活，想叫 Claude Code 来 review。

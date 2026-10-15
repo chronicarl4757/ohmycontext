@@ -780,6 +780,28 @@ export class OmcStore {
     return rows.length === 1 ? (rows[0]?.id ?? null) : null;
   }
 
+  /** exact id or all ids sharing a prefix (for ambiguity reporting) */
+  sessionIdsByPrefix(idOrPrefix: string): string[] {
+    const exact = this.db.prepare('SELECT id FROM sessions WHERE id = ?').get(idOrPrefix) as
+      | { id: string }
+      | undefined;
+    if (exact) return [exact.id];
+    const rows = this.db
+      .prepare('SELECT id FROM sessions WHERE id LIKE ? ORDER BY started_at DESC LIMIT 10')
+      .all(`${idOrPrefix}%`) as unknown as { id: string }[];
+    return rows.map((r) => r.id);
+  }
+
+  /** per-connector-source freshness of tailed files */
+  syncStateSummary(): { source: string; files: number; lastMtime: number | null }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT source, COUNT(*) AS files, MAX(mtime) AS last_mtime FROM sync_state GROUP BY source ORDER BY source`,
+      )
+      .all() as unknown as { source: string; files: number; last_mtime: number | null }[];
+    return rows.map((r) => ({ source: r.source, files: r.files, lastMtime: r.last_mtime }));
+  }
+
   /**
    * Attribution heuristic for filesystem artifacts: the most specific session
    * whose cwd is a path prefix of `dir` and whose [startedAt, endedAt+30min]

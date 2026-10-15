@@ -352,6 +352,261 @@ program
     });
   });
 
+program
+  .command('recent')
+  .description('recent activity feed: sessions touched within a time window')
+  .option('--minutes <n>', 'look-back window in minutes', '1440')
+  .option('-s, --source <source>', 'restrict to a source')
+  .option('-l, --limit <n>', 'max sessions', '20')
+  .option('--json', 'emit {total, returned, sessions}')
+  .action(async (opts: { minutes: string; source?: string; limit: string; json?: boolean }) => {
+    await withStore((store) => {
+      const since = new Date(Date.now() - Number(opts.minutes) * 60_000).toISOString();
+      const { sessions, total } = store.recentSessions({
+        since,
+        ...(opts.source ? { source: opts.source } : {}),
+        limit: Number(opts.limit),
+      });
+      if (opts.json) {
+        console.log(JSON.stringify({ total, returned: sessions.length, sessions }, null, 2));
+        return;
+      }
+      if (sessions.length === 0) {
+        console.log('no recent activity');
+        return;
+      }
+      for (const s of sessions) {
+        const label = oneLine(s.title ?? s.cwd ?? s.externalId).slice(0, 50);
+        const preview = s.lastMessagePreview ? oneLine(s.lastMessagePreview).slice(0, 90) : '';
+        console.log(
+          `${s.lastActivity.slice(0, 16).replace('T', ' ')} · ${s.source.padEnd(12)} · ${label} · ${s.messageCount} msgs · ${s.lastMessageRole ?? '?'}: ${preview} · ${s.id.slice(0, 8)}`,
+        );
+      }
+    });
+  });
+
+program
+  .command('get <session>')
+  .description('print one session (id or unique prefix, ≥6 chars) with messages in order')
+  .option('-l, --limit <n>', 'max messages (json only)', '100')
+  .option('--offset <n>', 'message offset for pagination (json only)', '0')
+  .option('-f, --format <fmt>', 'md | json', 'md')
+  .action(async (sessionArg: string, opts: { limit: string; offset: string; format: string }) => {
+    await withStore((store) => {
+      if (sessionArg.length < 6) {
+        console.error(`session prefix too short (need ≥6 chars): ${sessionArg}`);
+        process.exitCode = 1;
+        return;
+      }
+      const ids = store.sessionIdsByPrefix(sessionArg);
+      if (ids.length === 0) {
+        console.error(`no session matches: ${sessionArg}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (ids.length > 1) {
+        console.error(
+          `ambiguous prefix ${sessionArg} — matches: ${ids.map((i) => i.slice(0, 8)).join(', ')}`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      const id = ids[0]!;
+      const s = store.getSessions({ sessionId: id })[0];
+      if (!s) {
+        console.error('session not found');
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.format === 'json') {
+        const messages = store.getMessages({
+          sessionId: id,
+          limit: Number(opts.limit),
+          offset: Number(opts.offset),
+        });
+        console.log(
+          JSON.stringify(
+            {
+              session: s,
+              total: store.messageCount({ sessionId: id }),
+              returned: messages.length,
+              messages,
+              artifacts: store.getArtifacts({ sessionId: id, limit: 500 }),
+            },
+            null,
+            2,
+          ),
+        );
+      } else if (opts.format === 'md') {
+        process.stdout.write(renderSessionMd(store, s));
+      } else {
+        console.error(`unknown format: ${opts.format} (expected md or json)`);
+        process.exitCode = 1;
+      }
+    });
+  });
+
+const bus = program.command('bus').description('AI↔AI local message bus');
+
+bus
+  .command('post <channel> <content...>')
+  .description('post a message to a channel')
+  .option('--sender <name>', 'sender name (default: env OMC_SENDER or "cli")')
+  .option('--refs <list>', 'comma-separated refs (session ids / paths)')
+  .option('--client-msg-id <id>', 'idempotency key; reposts are dropped')
+  .option('--json', 'emit {seq, id, duplicate}')
+  .action(async (channel: string, content: string[], opts: { sender?: string; refs?: string; clientMsgId?: string; json?: boolean }) => {
+    await withStore((store) => {
+      const res = store.postBusMessage({
+        channel,
+        sender: opts.sender ?? process.env.OMC_SENDER ?? 'cli',
+        content: content.join(' '),
+        ...(opts.refs ? { refs: opts.refs.split(',').map((r) => r.trim()).filter(Boolean) } : {}),
+        ...(opts.clientMsgId ? { clientMsgId: opts.clientMsgId } : {}),
+      });
+      if (opts.json) {
+        console.log(JSON.stringify(res));
+        return;
+      }
+      console.log(`${res.duplicate ? 'duplicate (dropped)' : 'posted'} · seq=${res.seq} · id=${res.id}`);
+    });
+  });
+
+bus
+  .command('read')
+  .description('read messages (cursor-based); --wait long-polls for new ones')
+  .option('--channel <c>', 'restrict to a channel')
+  .option('--after-seq <n>', 'only messages with seq > cursor')
+  .option('--since <iso>', 'ISO-8601 lower bound')
+  .option('-l, --limit <n>', 'max messages', '100')
+  .option('--wait <sec>', 'poll up to N seconds for new messages (max 300)', '0')
+  .option('--json', 'emit {messages, latestSeq, truncated, timedOut?}')
+  .action(async (opts: { channel?: string; afterSeq?: string; since?: string; limit: string; wait: string; json?: boolean }) => {
+    await withStore(async (store) => {
+      const waitSec = Math.min(300, Math.max(0, Number(opts.wait) || 0));
+      const deadline = Date.now() + waitSec * 1000;
+      const readOnce = () =>
+        store.readBusMessages({
+          ...(opts.channel ? { channel: opts.channel } : {}),
+          ...(opts.afterSeq !== undefined ? { afterSeq: Number(opts.afterSeq) } : {}),
+          ...(opts.since ? { since: opts.since } : {}),
+          limit: Number(opts.limit),
+        });
+      let result = readOnce();
+      while (result.messages.length === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 500));
+        result = readOnce();
+      }
+      const timedOut = waitSec > 0 && result.messages.length === 0;
+      if (opts.json) {
+        console.log(JSON.stringify({ ...result, ...(waitSec > 0 ? { timedOut } : {}) }, null, 2));
+        return;
+      }
+      if (result.messages.length === 0) {
+        console.log(timedOut ? 'timed out (no new messages)' : 'no messages');
+        return;
+      }
+      for (const m of result.messages) {
+        console.log(`#${m.seq} · ${m.sender} · ${m.createdAt.slice(0, 19).replace('T', ' ')} · ${m.content}${m.refs ? ` · refs: ${m.refs.join(', ')}` : ''}`);
+      }
+      console.log(`cursor: latestSeq=${result.latestSeq}${result.truncated ? ' (more available)' : ''}`);
+    });
+  });
+
+bus
+  .command('channels')
+  .description('list channels with counts, last activity, senders')
+  .option('--json', 'emit {channels}')
+  .action(async (opts: { json?: boolean }) => {
+    await withStore((store) => {
+      const channels = store.listBusChannels();
+      if (opts.json) {
+        console.log(JSON.stringify({ channels }, null, 2));
+        return;
+      }
+      if (channels.length === 0) {
+        console.log('no channels yet — post with: omc bus post <channel> "hello"');
+        return;
+      }
+      for (const c of channels) {
+        console.log(`#${c.channel} · ${c.count} msgs · ${c.lastActivity.slice(0, 16).replace('T', ' ')} · ${c.senders.join(', ')}`);
+      }
+    });
+  });
+
+program
+  .command('doctor')
+  .description('self-diagnostic: daemon reachability, db, sources, sync freshness, hints')
+  .option('--json', 'emit the full structured report')
+  .action(async (opts: { json?: boolean }) => {
+    const port = Number(process.env.OMC_PORT) || DEFAULT_PORT;
+    let daemon: { ok?: boolean; version?: string; uptimeSec?: number } | null = null;
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/health`);
+      if (r.ok) daemon = (await r.json()) as typeof daemon;
+    } catch {
+      // daemon down
+    }
+    const report = await withStore(async (store) => {
+      const st = store.stats();
+      const now = Date.now();
+      const sync = store.syncStateSummary().map((s) => ({
+        source: s.source,
+        files: s.files,
+        lastMtime: s.lastMtime !== null ? new Date(s.lastMtime).toISOString() : null,
+        ageMinutes: s.lastMtime !== null ? Math.round((now - s.lastMtime) / 60_000) : null,
+      }));
+      const webSources = st.sources.filter((s) => s.source.endsWith('-web')).map((s) => s.source);
+      const hints: string[] = [];
+      if (!daemon) hints.push('daemon is down — run: omc watch (or omc ui)');
+      if (webSources.length === 0) {
+        hints.push('no web captures found — load the browser extension (docs/USER_GUIDE.md)');
+      }
+      for (const s of sync) {
+        if (!daemon && s.ageMinutes !== null && s.ageMinutes > 60) {
+          hints.push(`sync for '${s.source}' is stale (${s.ageMinutes} min) while daemon is down — run omc watch`);
+        }
+      }
+      return {
+        daemon,
+        port,
+        db: { path: st.dbPath, bytes: st.dbBytes, mebibytes: Math.round((st.dbBytes / 1024 / 1024) * 10) / 10 },
+        totals: st.totals,
+        earliest: st.earliest,
+        latest: st.latest,
+        sources: st.sources,
+        webSources,
+        sync,
+        hints,
+      };
+    });
+    if (opts.json) {
+      console.log(JSON.stringify(report, null, 2));
+    } else {
+      console.log(
+        `${daemon ? '✓' : '✗'} daemon ${daemon ? `online at 127.0.0.1:${report.port} · v${daemon.version ?? '?'}` : `unreachable at 127.0.0.1:${report.port}`}`,
+      );
+      console.log(`  db: ${report.db.path} (${report.db.mebibytes} MiB)`);
+      console.log(
+        `  totals: ${report.totals.sessions} sessions · ${report.totals.messages} messages · ${report.totals.artifacts} artifacts · range ${report.earliest?.slice(0, 10) ?? '-'} → ${report.latest?.slice(0, 10) ?? '-'}`,
+      );
+      for (const s of report.sources) {
+        console.log(`  ${s.source}: ${s.sessions} sessions, ${s.messages} messages, ${s.artifacts} artifacts`);
+      }
+      console.log(`  web capture: ${report.webSources.length > 0 ? `active (${report.webSources.join(', ')})` : 'none'}`);
+      for (const s of report.sync) {
+        console.log(
+          `  sync ${s.source}: ${s.files} files · latest ${s.lastMtime ? s.lastMtime.slice(0, 16).replace('T', ' ') : '-'}${s.ageMinutes !== null ? ` (${s.ageMinutes} min ago)` : ''}`,
+        );
+      }
+      if (report.hints.length > 0) {
+        console.log('hints:');
+        for (const h of report.hints) console.log(`  → ${h}`);
+      }
+    }
+    if (!daemon) process.exitCode = 1;
+  });
+
 await program.parseAsync(process.argv).catch((err: unknown) => {
   console.error(err instanceof Error ? err.message : String(err));
   process.exit(1);
